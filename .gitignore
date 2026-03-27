@@ -1,0 +1,33 @@
+# Models (large files, downloaded at runtime)
+models/
+
+# Job workspace (videos, transcripts, renders)
+workspace/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+
+# Docker
+docker/.env
+
+# YouTube credentials (sensitive)
+youtube_token.json
+client_secret*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
