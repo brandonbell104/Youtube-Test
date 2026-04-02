@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 import cv2
-import mediapipe as mp
 import numpy as np
 
 from src.config import Config
@@ -37,6 +36,34 @@ POSE_LANDMARK_NAMES = [
 ]
 
 
+def _create_pose_landmarker(config: Config):
+    """Create a MediaPipe PoseLandmarker using the new Tasks API."""
+    import mediapipe as mp
+    from mediapipe.tasks import python as mp_python
+    from mediapipe.tasks.python import vision
+
+    # Download model if needed
+    model_path = config.models_dir / "pose_landmarker_heavy.task"
+    if not model_path.exists():
+        import urllib.request
+        # heavy model = most accurate (matches old model_complexity=2)
+        url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task"
+        logger.info("Downloading MediaPipe pose model (heavy)...")
+        urllib.request.urlretrieve(url, str(model_path))
+        logger.info("Download complete: %s", model_path)
+
+    base_options = mp_python.BaseOptions(model_asset_path=str(model_path))
+    options = vision.PoseLandmarkerOptions(
+        base_options=base_options,
+        running_mode=vision.RunningMode.VIDEO,
+        num_poses=1,
+        min_pose_detection_confidence=config.tracking_min_detection_confidence,
+        min_tracking_confidence=config.tracking_min_tracking_confidence,
+        output_segmentation_masks=False,
+    )
+    return vision.PoseLandmarker.create_from_options(options)
+
+
 class TrackingStage(Stage):
     name = "tracking"
 
@@ -44,6 +71,8 @@ class TrackingStage(Stage):
         super().__init__(config)
 
     def run(self, job_id: str, out_dir: Path) -> dict[str, Any]:
+        import mediapipe as mp
+
         video_path = self.prev_stage_dir(job_id, "download") / "video.mp4"
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
@@ -61,15 +90,7 @@ class TrackingStage(Stage):
             "Tracking %d frames at %.1f fps (%dx%d)", total_frames, fps, width, height
         )
 
-        mp_pose = mp.solutions.pose
-        pose = mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=self.config.tracking_model_complexity,
-            smooth_landmarks=True,
-            enable_segmentation=False,
-            min_detection_confidence=self.config.tracking_min_detection_confidence,
-            min_tracking_confidence=self.config.tracking_min_tracking_confidence,
-        )
+        landmarker = _create_pose_landmarker(self.config)
 
         frames_data = []
         frame_idx = 0
@@ -82,32 +103,37 @@ class TrackingStage(Stage):
 
             # MediaPipe expects RGB
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = pose.process(rgb)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+            # Timestamp in milliseconds
+            timestamp_ms = int(frame_idx * 1000 / fps)
+            results = landmarker.detect_for_video(mp_image, timestamp_ms)
 
             frame_entry = {"frame": frame_idx, "timestamp": round(frame_idx / fps, 4)}
 
-            if results.pose_landmarks:
+            if results.pose_landmarks and len(results.pose_landmarks) > 0:
+                # Normalized landmarks (0-1 range relative to image)
                 landmarks = []
-                for i, lm in enumerate(results.pose_landmarks.landmark):
+                for i, lm in enumerate(results.pose_landmarks[0]):
                     landmarks.append({
                         "name": POSE_LANDMARK_NAMES[i] if i < len(POSE_LANDMARK_NAMES) else f"landmark_{i}",
                         "x": round(lm.x, 6),
                         "y": round(lm.y, 6),
                         "z": round(lm.z, 6),
-                        "visibility": round(lm.visibility, 4),
+                        "visibility": round(lm.visibility, 4) if hasattr(lm, "visibility") else 1.0,
                     })
                 frame_entry["landmarks"] = landmarks
 
-                # Also store world landmarks (metric-scale 3D)
-                if results.pose_world_landmarks:
+                # World landmarks (metric-scale 3D)
+                if results.pose_world_landmarks and len(results.pose_world_landmarks) > 0:
                     world_landmarks = []
-                    for i, lm in enumerate(results.pose_world_landmarks.landmark):
+                    for i, lm in enumerate(results.pose_world_landmarks[0]):
                         world_landmarks.append({
                             "name": POSE_LANDMARK_NAMES[i] if i < len(POSE_LANDMARK_NAMES) else f"landmark_{i}",
                             "x": round(lm.x, 6),
                             "y": round(lm.y, 6),
                             "z": round(lm.z, 6),
-                            "visibility": round(lm.visibility, 4),
+                            "visibility": round(lm.visibility, 4) if hasattr(lm, "visibility") else 1.0,
                         })
                     frame_entry["world_landmarks"] = world_landmarks
 
@@ -122,7 +148,7 @@ class TrackingStage(Stage):
                 logger.info("Tracked %d/%d frames (%.0f%%)", frame_idx, total_frames, 100 * frame_idx / max(total_frames, 1))
 
         cap.release()
-        pose.close()
+        landmarker.close()
 
         # Write tracking data
         tracking_output = {
