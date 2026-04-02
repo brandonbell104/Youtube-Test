@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     wget \
     curl \
+    unzip \
     blender \
     libsm6 \
     libxext6 \
