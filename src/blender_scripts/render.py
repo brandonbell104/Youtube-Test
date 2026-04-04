@@ -359,23 +359,19 @@ def setup_render_settings(config: dict):
     """Configure render settings."""
     scene = bpy.context.scene
 
-    # Try Cycles with GPU first (much better headless support), fall back to EEVEE
-    scene.render.engine = "CYCLES"
-    prefs = bpy.context.preferences.addons.get("cycles")
-    if prefs:
-        prefs.preferences.compute_device_type = "CUDA"
-        bpy.context.preferences.addons["cycles"].preferences.get_devices()
-        for device in bpy.context.preferences.addons["cycles"].preferences.devices:
-            device.use = True
-            print(f"  Render device: {device.name} ({device.type})")
-        scene.cycles.device = "GPU"
-        scene.cycles.samples = 32  # Lower samples for speed, still looks good
-        scene.cycles.use_denoising = True
-        print("Using Cycles GPU rendering")
-    else:
-        # Fallback to EEVEE
-        scene.render.engine = "BLENDER_EEVEE_NEXT" if bpy.app.version >= (4, 0, 0) else "BLENDER_EEVEE"
-        print("Cycles not available, using EEVEE")
+    # Use Workbench renderer — extremely fast on CPU, clean look
+    # Perfect for avatar rendering without needing GPU
+    scene.render.engine = "BLENDER_WORKBENCH"
+
+    # Workbench display settings for nice-looking output
+    scene.display.shading.light = "STUDIO"
+    scene.display.shading.studio_light = "studio.exr"
+    scene.display.shading.color_type = "MATERIAL"
+    scene.display.shading.show_shadows = True
+    scene.display.shading.show_cavity = True
+    scene.display.render_aa = "8"  # Anti-aliasing
+
+    print("Using Workbench renderer (fast CPU rendering)")
     scene.render.resolution_x = config["resolution_x"]
     scene.render.resolution_y = config["resolution_y"]
     scene.render.fps = config["fps"]
