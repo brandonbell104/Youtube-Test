@@ -82,10 +82,11 @@ class BlenderRenderStage(Stage):
             timeout=7200,  # 2 hour timeout for long renders
         )
 
+        # Always write logs for debugging
+        (out_dir / "blender_stdout.log").write_text(proc.stdout)
+        (out_dir / "blender_stderr.log").write_text(proc.stderr)
+
         if proc.returncode != 0:
-            # Write Blender output for debugging
-            (out_dir / "blender_stdout.log").write_text(proc.stdout)
-            (out_dir / "blender_stderr.log").write_text(proc.stderr)
             raise RuntimeError(
                 f"Blender render failed (exit code {proc.returncode}). "
                 f"Check {out_dir}/blender_stderr.log"

@@ -361,9 +361,12 @@ def setup_render_settings(config: dict):
 
     # EEVEE settings for quality
     if hasattr(scene, "eevee"):
-        scene.eevee.use_gtao = True
-        scene.eevee.use_bloom = True
-        scene.eevee.taa_render_samples = 64
+        if hasattr(scene.eevee, "use_gtao"):
+            scene.eevee.use_gtao = True
+        if hasattr(scene.eevee, "use_bloom"):
+            scene.eevee.use_bloom = True
+        if hasattr(scene.eevee, "taa_render_samples"):
+            scene.eevee.taa_render_samples = 64
 
 
 def add_audio(voice_path: str):

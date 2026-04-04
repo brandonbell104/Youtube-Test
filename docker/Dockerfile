@@ -14,7 +14,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     unzip \
-    blender \
     libsm6 \
     libxext6 \
     libgl1-mesa-glx \
@@ -23,6 +22,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/* \
     && ldconfig
+
+# Install Blender 4.2 LTS (apt only has 3.0 which is too old)
+RUN wget -q https://mirror.clarkson.edu/blender/release/Blender4.2/blender-4.2.0-linux-x64.tar.xz \
+    -O /tmp/blender.tar.xz \
+    && tar -xf /tmp/blender.tar.xz -C /opt/ \
+    && ln -sf /opt/blender-4.2.0-linux-x64/blender /usr/local/bin/blender \
+    && rm /tmp/blender.tar.xz
 
 # Set python3.11 as default
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
