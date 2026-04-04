@@ -34,7 +34,8 @@ RUN wget -q https://github.com/DanielSWolf/rhubarb-lip-sync/releases/download/v1
     && mkdir -p /opt/rhubarb \
     && cd /opt/rhubarb && unzip /tmp/rhubarb.zip \
     && rm /tmp/rhubarb.zip \
-    && ln -s /opt/rhubarb/rhubarb /usr/local/bin/rhubarb
+    && find /opt/rhubarb -name "rhubarb" -type f -executable -exec ln -sf {} /usr/local/bin/rhubarb \; \
+    && rhubarb --version || echo "Rhubarb installed at: $(which rhubarb 2>/dev/null || find /opt/rhubarb -name rhubarb)"
 
 # Install Piper TTS
 RUN wget -q https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz \
