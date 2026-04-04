@@ -7,7 +7,9 @@ services:
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - NVIDIA_REQUIRE_CUDA=cuda>=12.0
+      - __EGL_VENDOR_LIBRARY_DIRS=/usr/share/glvnd/egl_vendor.d
       - OLLAMA_HOST=http://ollama:11434
     ports:
       - "${WEB_PORT:-7860}:7860"

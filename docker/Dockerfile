@@ -18,8 +18,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libgl1-mesa-glx \
+    libgl1-mesa-dri \
     libgles2-mesa \
     libegl1-mesa \
+    libegl-mesa0 \
+    libglvnd0 \
+    libglx0 \
+    libglx-mesa0 \
+    libegl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/* \
     && ldconfig

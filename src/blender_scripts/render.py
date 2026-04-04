@@ -70,7 +70,19 @@ def import_avatar(avatar_path: str) -> bpy.types.Object:
                 break
 
     if armature is None:
-        raise RuntimeError("No armature found in imported avatar")
+        # Some glTF models import bones as Empty objects — print what we got
+        print("WARNING: No armature found. Objects in scene:")
+        for obj in bpy.data.objects:
+            print(f"  - {obj.name} (type={obj.type})")
+
+        # Try to find any mesh and proceed without armature
+        # The render will still work, just without pose animation
+        for obj in bpy.data.objects:
+            if obj.type == "MESH":
+                print(f"Using mesh object '{obj.name}' without armature")
+                return None
+
+        raise RuntimeError("No armature or mesh found in imported avatar")
 
     return armature
 
@@ -346,7 +358,24 @@ def setup_camera_and_lighting():
 def setup_render_settings(config: dict):
     """Configure render settings."""
     scene = bpy.context.scene
-    scene.render.engine = "BLENDER_EEVEE_NEXT" if bpy.app.version >= (4, 0, 0) else "BLENDER_EEVEE"
+
+    # Try Cycles with GPU first (much better headless support), fall back to EEVEE
+    scene.render.engine = "CYCLES"
+    prefs = bpy.context.preferences.addons.get("cycles")
+    if prefs:
+        prefs.preferences.compute_device_type = "CUDA"
+        bpy.context.preferences.addons["cycles"].preferences.get_devices()
+        for device in bpy.context.preferences.addons["cycles"].preferences.devices:
+            device.use = True
+            print(f"  Render device: {device.name} ({device.type})")
+        scene.cycles.device = "GPU"
+        scene.cycles.samples = 32  # Lower samples for speed, still looks good
+        scene.cycles.use_denoising = True
+        print("Using Cycles GPU rendering")
+    else:
+        # Fallback to EEVEE
+        scene.render.engine = "BLENDER_EEVEE_NEXT" if bpy.app.version >= (4, 0, 0) else "BLENDER_EEVEE"
+        print("Cycles not available, using EEVEE")
     scene.render.resolution_x = config["resolution_x"]
     scene.render.resolution_y = config["resolution_y"]
     scene.render.fps = config["fps"]
@@ -409,12 +438,18 @@ def main():
     # Load and apply tracking data
     print(f"Loading tracking data: {config['tracking_path']}")
     tracking_data = json.loads(Path(config["tracking_path"]).read_text())
-    apply_tracking(armature, tracking_data)
+    if armature is not None:
+        apply_tracking(armature, tracking_data)
+    else:
+        print("Skipping tracking — no armature available")
 
     # Load and apply lip sync
     print(f"Loading lip sync data: {config['lipsync_path']}")
     lipsync_data = json.loads(Path(config["lipsync_path"]).read_text())
-    apply_lipsync(armature, lipsync_data, float(config["fps"]))
+    if armature is not None:
+        apply_lipsync(armature, lipsync_data, float(config["fps"]))
+    else:
+        print("Skipping lip sync — no armature available")
 
     # Add audio
     print(f"Adding audio: {config['voice_path']}")
