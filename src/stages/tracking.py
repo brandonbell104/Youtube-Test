@@ -72,12 +72,28 @@ class TrackingStage(Stage):
 
     def run(self, job_id: str, out_dir: Path) -> dict[str, Any]:
         import mediapipe as mp
+        import subprocess
 
         video_path = self.prev_stage_dir(job_id, "download") / "video.mp4"
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
 
-        cap = cv2.VideoCapture(str(video_path))
+        # Re-encode to H.264 if needed — some codecs (AV1) aren't supported by OpenCV
+        converted_path = out_dir / "video_h264.mp4"
+        logger.info("Converting video to H.264 for tracking compatibility...")
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(video_path),
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                "-c:a", "copy", str(converted_path),
+            ],
+            capture_output=True, text=True, timeout=600,
+        )
+        if proc.returncode != 0 or not converted_path.exists():
+            logger.warning("FFmpeg conversion failed, trying original: %s", proc.stderr[-500:] if proc.stderr else "")
+            converted_path = video_path
+
+        cap = cv2.VideoCapture(str(converted_path))
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {video_path}")
 
