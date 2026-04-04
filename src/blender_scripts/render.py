@@ -371,10 +371,11 @@ def setup_render_settings(config: dict):
         else:
             device.use = False
     scene.cycles.device = "GPU"
-    scene.cycles.samples = 32
-    scene.cycles.use_denoising = True
+    scene.cycles.samples = 16
+    scene.cycles.use_denoising = False  # Denoising runs on CPU and is the bottleneck
     scene.cycles.use_adaptive_sampling = True
-    print("Using Cycles GPU (CUDA) rendering")
+    scene.cycles.adaptive_threshold = 0.1
+    print("Using Cycles GPU (CUDA) rendering — 16 samples, no denoising")
     scene.render.resolution_x = config["resolution_x"]
     scene.render.resolution_y = config["resolution_y"]
     scene.render.fps = config["fps"]
