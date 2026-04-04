@@ -23,6 +23,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
+# Ensure libGLESv2 symlink exists for MediaPipe
+RUN ldconfig && \
+    find / -name "libGLESv2*" 2>/dev/null || \
+    apt-get update && apt-get install -y libgles-dev && rm -rf /var/lib/apt/lists/*
+
 # Set python3.11 as default
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
     && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
