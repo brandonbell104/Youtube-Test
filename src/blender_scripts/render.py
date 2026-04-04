@@ -359,19 +359,22 @@ def setup_render_settings(config: dict):
     """Configure render settings."""
     scene = bpy.context.scene
 
-    # Use Workbench renderer — extremely fast on CPU, clean look
-    # Perfect for avatar rendering without needing GPU
-    scene.render.engine = "BLENDER_WORKBENCH"
-
-    # Workbench display settings for nice-looking output
-    scene.display.shading.light = "STUDIO"
-    scene.display.shading.studio_light = "studio.exr"
-    scene.display.shading.color_type = "MATERIAL"
-    scene.display.shading.show_shadows = True
-    scene.display.shading.show_cavity = True
-    scene.display.render_aa = "8"  # Anti-aliasing
-
-    print("Using Workbench renderer (fast CPU rendering)")
+    # Use Cycles with CUDA GPU rendering
+    scene.render.engine = "CYCLES"
+    prefs = bpy.context.preferences.addons["cycles"].preferences
+    prefs.compute_device_type = "CUDA"
+    prefs.get_devices()
+    for device in prefs.devices:
+        if device.type == "CUDA":
+            device.use = True
+            print(f"  GPU enabled: {device.name}")
+        else:
+            device.use = False
+    scene.cycles.device = "GPU"
+    scene.cycles.samples = 32
+    scene.cycles.use_denoising = True
+    scene.cycles.use_adaptive_sampling = True
+    print("Using Cycles GPU (CUDA) rendering")
     scene.render.resolution_x = config["resolution_x"]
     scene.render.resolution_y = config["resolution_y"]
     scene.render.fps = config["fps"]
