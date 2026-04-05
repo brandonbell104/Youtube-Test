@@ -146,15 +146,18 @@ def find_bone(armature: bpy.types.Object, canonical_name: str) -> str | None:
 
 def compute_bone_rotation(
     parent_landmark: dict, child_landmark: dict, rest_direction: Vector
-) -> Euler:
+):
     """
     Compute the rotation needed to point a bone from parent to child landmark,
     relative to its rest pose direction.
     """
+    # MediaPipe coordinate system → Blender coordinate system
+    # MediaPipe: X=right, Y=down, Z=toward camera
+    # Blender:   X=right, Y=forward, Z=up
     target = Vector((
         child_landmark["x"],
-        -child_landmark["z"],  # MediaPipe Z → Blender -Y
-        -child_landmark["y"],  # MediaPipe Y → Blender -Z (flip for coordinate system)
+        -child_landmark["z"],
+        -child_landmark["y"],
     ))
     origin = Vector((
         parent_landmark["x"],
@@ -164,11 +167,11 @@ def compute_bone_rotation(
 
     direction = (target - origin).normalized()
     if direction.length < 0.001:
-        return Euler((0, 0, 0))
+        return None
 
     # Compute rotation from rest pose to target direction
     rotation = rest_direction.rotation_difference(direction)
-    return rotation.to_euler()
+    return rotation
 
 
 def apply_tracking(armature: bpy.types.Object, tracking_data: dict):
@@ -176,12 +179,13 @@ def apply_tracking(armature: bpy.types.Object, tracking_data: dict):
     frames = tracking_data["frames"]
     fps = tracking_data["fps"]
 
-    # Build a landmark lookup for quick access
-    landmark_names = tracking_data.get("landmark_names", [])
-
     # Enter pose mode
     bpy.context.view_layer.objects.active = armature
     bpy.ops.object.mode_set(mode="POSE")
+
+    # Set rotation mode to quaternion for all pose bones
+    for pb in armature.pose.bones:
+        pb.rotation_mode = "QUATERNION"
 
     # Map bones
     bone_map = {}
@@ -192,6 +196,27 @@ def apply_tracking(armature: bpy.types.Object, tracking_data: dict):
 
     print(f"Mapped {len(bone_map)} bones: {list(bone_map.keys())}")
 
+    # Cache rest pose directions
+    rest_directions = {}
+    for canonical, actual_name in bone_map.items():
+        bone = armature.data.bones.get(actual_name)
+        if bone:
+            rest_directions[canonical] = (bone.tail_local - bone.head_local).normalized()
+
+    # Limb pairs: (parent_landmark, child_landmark, bone_canonical)
+    limb_pairs = [
+        ("left_shoulder", "left_elbow", "LeftArm"),
+        ("left_elbow", "left_wrist", "LeftForeArm"),
+        ("right_shoulder", "right_elbow", "RightArm"),
+        ("right_elbow", "right_wrist", "RightForeArm"),
+        ("left_hip", "left_knee", "LeftUpLeg"),
+        ("left_knee", "left_ankle", "LeftLeg"),
+        ("right_hip", "right_knee", "RightUpLeg"),
+        ("right_knee", "right_ankle", "RightLeg"),
+    ]
+
+    tracked_frame_count = 0
+
     # Process each frame
     for frame_data in frames:
         frame_idx = frame_data["frame"]
@@ -201,62 +226,59 @@ def apply_tracking(armature: bpy.types.Object, tracking_data: dict):
             continue
 
         # Build landmark dict by name
-        lm_dict = {}
-        for lm in landmarks:
-            lm_dict[lm["name"]] = lm
+        lm_dict = {lm["name"]: lm for lm in landmarks}
 
         bpy.context.scene.frame_set(frame_idx)
 
         # Apply root (hip) position
-        hips_bone_name = find_bone(armature, "Hips")
+        hips_bone_name = bone_map.get("Hips")
         if hips_bone_name and "left_hip" in lm_dict and "right_hip" in lm_dict:
             pose_bone = armature.pose.bones.get(hips_bone_name)
             if pose_bone:
                 lh = lm_dict["left_hip"]
                 rh = lm_dict["right_hip"]
+                # Scale factor to map MediaPipe coords to Blender scene
+                scale = 2.0
                 hip_center = Vector((
-                    (lh["x"] + rh["x"]) / 2,
-                    -(lh["z"] + rh["z"]) / 2,
-                    -(lh["y"] + rh["y"]) / 2,
+                    (lh["x"] + rh["x"]) / 2 * scale,
+                    -(lh["z"] + rh["z"]) / 2 * scale,
+                    -(lh["y"] + rh["y"]) / 2 * scale,
                 ))
                 pose_bone.location = hip_center
                 pose_bone.keyframe_insert(data_path="location", frame=frame_idx)
 
-        # Apply limb rotations based on landmark pairs
-        limb_pairs = [
-            ("left_shoulder", "left_elbow", "LeftArm"),
-            ("left_elbow", "left_wrist", "LeftForeArm"),
-            ("right_shoulder", "right_elbow", "RightArm"),
-            ("right_elbow", "right_wrist", "RightForeArm"),
-            ("left_hip", "left_knee", "LeftUpLeg"),
-            ("left_knee", "left_ankle", "LeftLeg"),
-            ("right_hip", "right_knee", "RightUpLeg"),
-            ("right_knee", "right_ankle", "RightLeg"),
-        ]
-
+        # Apply limb rotations
         for parent_lm, child_lm, bone_canonical in limb_pairs:
             if parent_lm not in lm_dict or child_lm not in lm_dict:
                 continue
 
-            bone_name = bone_map.get(bone_canonical)
-            if not bone_name:
+            actual_name = bone_map.get(bone_canonical)
+            if not actual_name:
                 continue
 
-            pose_bone = armature.pose.bones.get(bone_name)
+            pose_bone = armature.pose.bones.get(actual_name)
             if not pose_bone:
                 continue
 
-            # Get rest pose direction
-            rest_dir = (pose_bone.bone.tail_local - pose_bone.bone.head_local).normalized()
+            rest_dir = rest_directions.get(bone_canonical)
+            if not rest_dir:
+                continue
 
             rotation = compute_bone_rotation(
                 lm_dict[parent_lm], lm_dict[child_lm], rest_dir
             )
-            pose_bone.rotation_euler = rotation
-            pose_bone.keyframe_insert(data_path="rotation_euler", frame=frame_idx)
+            if rotation is not None:
+                # Apply rotation in bone's local space
+                pose_bone.rotation_quaternion = rotation
+                pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_idx)
+
+        tracked_frame_count += 1
+
+        if tracked_frame_count % 200 == 0:
+            print(f"Applied tracking: {tracked_frame_count} frames processed")
 
     bpy.ops.object.mode_set(mode="OBJECT")
-    print(f"Applied tracking to {len(frames)} frames")
+    print(f"Applied tracking to {tracked_frame_count} frames")
 
 
 def apply_lipsync(armature: bpy.types.Object, lipsync_data: dict, fps: float):
