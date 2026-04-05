@@ -16,7 +16,7 @@ import json
 import math
 import sys
 from pathlib import Path
-from mathutils import Vector, Euler, Matrix
+from mathutils import Vector, Euler, Matrix, Quaternion
 
 
 def load_config() -> dict:
@@ -144,34 +144,46 @@ def find_bone(armature: bpy.types.Object, canonical_name: str) -> str | None:
     return None
 
 
-def compute_bone_rotation(
-    parent_landmark: dict, child_landmark: dict, rest_direction: Vector
-):
+def mediapipe_to_blender(lm: dict) -> Vector:
+    """Convert a MediaPipe landmark to Blender coordinate space.
+    MediaPipe: X=right, Y=down, Z=toward camera
+    Blender:   X=right, Y=forward (into screen), Z=up
     """
-    Compute the rotation needed to point a bone from parent to child landmark,
-    relative to its rest pose direction.
-    """
-    # MediaPipe coordinate system → Blender coordinate system
-    # MediaPipe: X=right, Y=down, Z=toward camera
-    # Blender:   X=right, Y=forward, Z=up
-    target = Vector((
-        child_landmark["x"],
-        -child_landmark["z"],
-        -child_landmark["y"],
-    ))
-    origin = Vector((
-        parent_landmark["x"],
-        -parent_landmark["z"],
-        -parent_landmark["y"],
-    ))
+    return Vector((lm["x"], -lm["z"], -lm["y"]))
 
-    direction = (target - origin).normalized()
-    if direction.length < 0.001:
+
+def compute_pose_rotation(pose_bone, target_direction: Vector):
+    """
+    Compute the pose bone quaternion that points the bone in target_direction
+    (given in armature space), properly converted to bone-local space.
+    """
+    bone = pose_bone.bone
+
+    # Bone rest direction in armature space
+    rest_dir = (bone.tail_local - bone.head_local).normalized()
+
+    if target_direction.length < 0.001:
         return None
 
-    # Compute rotation from rest pose to target direction
-    rotation = rest_direction.rotation_difference(direction)
-    return rotation
+    # Delta rotation from rest direction to target direction (in armature space)
+    armature_delta = rest_dir.rotation_difference(target_direction)
+
+    # Target bone matrix in armature space = delta applied to rest matrix
+    rest_mat = bone.matrix_local
+    target_mat = armature_delta.to_matrix().to_4x4() @ rest_mat
+
+    # Convert both to bone-local space (relative to parent rest pose)
+    if bone.parent:
+        parent_inv = bone.parent.matrix_local.inverted()
+        local_target = parent_inv @ target_mat
+        local_rest = parent_inv @ rest_mat
+    else:
+        local_target = target_mat
+        local_rest = rest_mat
+
+    # Pose rotation = rest_local^-1 @ target_local
+    pose_rot = local_rest.to_quaternion().inverted() @ local_target.to_quaternion()
+    return pose_rot
 
 
 def apply_tracking(armature: bpy.types.Object, tracking_data: dict):
@@ -196,12 +208,13 @@ def apply_tracking(armature: bpy.types.Object, tracking_data: dict):
 
     print(f"Mapped {len(bone_map)} bones: {list(bone_map.keys())}")
 
-    # Cache rest pose directions
-    rest_directions = {}
+    # Print bone hierarchy for debugging
     for canonical, actual_name in bone_map.items():
         bone = armature.data.bones.get(actual_name)
         if bone:
-            rest_directions[canonical] = (bone.tail_local - bone.head_local).normalized()
+            parent_name = bone.parent.name if bone.parent else "None"
+            rest_dir = (bone.tail_local - bone.head_local).normalized()
+            print(f"  {canonical} -> {actual_name} (parent: {parent_name}, rest_dir: {rest_dir})")
 
     # Limb pairs: (parent_landmark, child_landmark, bone_canonical)
     limb_pairs = [
@@ -215,7 +228,15 @@ def apply_tracking(armature: bpy.types.Object, tracking_data: dict):
         ("right_knee", "right_ankle", "RightLeg"),
     ]
 
+    # Spine tracking: use shoulders midpoint → nose direction
+    spine_pairs = [
+        ("Spine", "left_shoulder", "right_shoulder", "nose"),
+    ]
+
     tracked_frame_count = 0
+    # For smoothing: store previous rotations per bone
+    prev_rotations = {}
+    smooth_factor = 0.3  # 0 = no smoothing, 1 = completely frozen
 
     # Process each frame
     for frame_data in frames:
@@ -235,15 +256,10 @@ def apply_tracking(armature: bpy.types.Object, tracking_data: dict):
         if hips_bone_name and "left_hip" in lm_dict and "right_hip" in lm_dict:
             pose_bone = armature.pose.bones.get(hips_bone_name)
             if pose_bone:
-                lh = lm_dict["left_hip"]
-                rh = lm_dict["right_hip"]
-                # Scale factor to map MediaPipe coords to Blender scene
+                lh = mediapipe_to_blender(lm_dict["left_hip"])
+                rh = mediapipe_to_blender(lm_dict["right_hip"])
                 scale = 2.0
-                hip_center = Vector((
-                    (lh["x"] + rh["x"]) / 2 * scale,
-                    -(lh["z"] + rh["z"]) / 2 * scale,
-                    -(lh["y"] + rh["y"]) / 2 * scale,
-                ))
+                hip_center = (lh + rh) / 2 * scale
                 pose_bone.location = hip_center
                 pose_bone.keyframe_insert(data_path="location", frame=frame_idx)
 
@@ -260,15 +276,44 @@ def apply_tracking(armature: bpy.types.Object, tracking_data: dict):
             if not pose_bone:
                 continue
 
-            rest_dir = rest_directions.get(bone_canonical)
-            if not rest_dir:
+            # Compute target direction in Blender armature space
+            origin = mediapipe_to_blender(lm_dict[parent_lm])
+            target = mediapipe_to_blender(lm_dict[child_lm])
+            direction = (target - origin).normalized()
+
+            rotation = compute_pose_rotation(pose_bone, direction)
+            if rotation is not None:
+                # Apply smoothing to reduce jitter
+                if bone_canonical in prev_rotations:
+                    rotation = prev_rotations[bone_canonical].slerp(rotation, 1.0 - smooth_factor)
+                prev_rotations[bone_canonical] = rotation.copy()
+
+                pose_bone.rotation_quaternion = rotation
+                pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_idx)
+
+        # Apply spine rotation (shoulders midpoint toward nose)
+        for spine_bone, lm_left, lm_right, lm_target in spine_pairs:
+            if lm_left not in lm_dict or lm_right not in lm_dict or lm_target not in lm_dict:
+                continue
+            actual_name = bone_map.get(spine_bone)
+            if not actual_name:
+                continue
+            pose_bone = armature.pose.bones.get(actual_name)
+            if not pose_bone:
                 continue
 
-            rotation = compute_bone_rotation(
-                lm_dict[parent_lm], lm_dict[child_lm], rest_dir
-            )
+            left = mediapipe_to_blender(lm_dict[lm_left])
+            right = mediapipe_to_blender(lm_dict[lm_right])
+            head = mediapipe_to_blender(lm_dict[lm_target])
+            mid_shoulder = (left + right) / 2
+            direction = (head - mid_shoulder).normalized()
+
+            rotation = compute_pose_rotation(pose_bone, direction)
             if rotation is not None:
-                # Apply rotation in bone's local space
+                if spine_bone in prev_rotations:
+                    rotation = prev_rotations[spine_bone].slerp(rotation, 1.0 - smooth_factor)
+                prev_rotations[spine_bone] = rotation.copy()
+
                 pose_bone.rotation_quaternion = rotation
                 pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_idx)
 
