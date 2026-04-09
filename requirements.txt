@@ -10,10 +10,20 @@ yt-dlp>=2024.1.0
 faster-whisper>=1.0.0
 ctranslate2>=4.0.0
 
-# Body pose tracking
-mediapipe>=0.10.0
+# SMPL body model evaluation (for tracking and Blender rig)
+smplx>=0.1.28
+trimesh>=4.0.0
+chumpy>=0.70
+
+# PyTorch (GVHMR + smplx) — CUDA 12.1 wheels
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.3.0
+torchvision==0.18.0
+
+# Video I/O
 opencv-python-headless>=4.8.0
-numpy>=1.24.0
+numpy>=1.24.0,<2.0
+scipy>=1.10.0
 
 # LLM interaction (Ollama API)
 requests>=2.31.0

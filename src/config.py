@@ -37,10 +37,11 @@ class Config:
     # ── Rhubarb Lip Sync ────────────────────────────────────────────────
     rhubarb_bin: str = field(default_factory=lambda: _env("RHUBARB_BIN", "rhubarb"))
 
-    # ── MediaPipe ────────────────────────────────────────────────────────
-    tracking_model_complexity: int = 2  # 0, 1, or 2 (2 = most accurate)
-    tracking_min_detection_confidence: float = 0.7
-    tracking_min_tracking_confidence: float = 0.7
+    # ── GVHMR / SMPL tracking ───────────────────────────────────────────
+    gvhmr_root: Path = field(default_factory=lambda: Path(_env("GVHMR_ROOT", "/opt/gvhmr")))
+    smpl_model_dir: Path = field(default=None)  # expects SMPL_NEUTRAL.pkl inside
+    smpl_gender: str = field(default_factory=lambda: _env("SMPL_GENDER", "neutral"))
+    tracking_static_camera: bool = True  # pass -s flag to GVHMR (yoga videos usually static)
 
     # ── Blender ──────────────────────────────────────────────────────────
     blender_bin: str = field(default_factory=lambda: _env("BLENDER_BIN", "blender"))
@@ -73,11 +74,14 @@ class Config:
             self.db_path = self.workspace_dir / "jobs.db"
         if self.youtube_token_path is None:
             self.youtube_token_path = self.base_dir / "youtube_token.json"
+        if self.smpl_model_dir is None:
+            self.smpl_model_dir = self.models_dir / "smpl"
 
         # Ensure directories exist
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self.avatars_dir.mkdir(parents=True, exist_ok=True)
+        self.smpl_model_dir.mkdir(parents=True, exist_ok=True)
 
     def job_dir(self, job_id: str) -> Path:
         """Return the working directory for a specific job."""

@@ -4,11 +4,16 @@ Blender headless render script.
 Called via: blender --background --python render.py -- /path/to/render_config.json
 
 This script:
-  1. Imports a 3D avatar (.glb/.fbx)
-  2. Applies body pose tracking data from MediaPipe to the armature
-  3. Applies lip sync viseme data to facial blend shapes
-  4. Adds the voice audio track
-  5. Renders the final video
+  1. Builds an SMPL armature + skinned mesh from data pre-computed by the
+     tracking stage (smpl_rig.json + smpl_mesh.npz). The tracking stage runs
+     GVHMR to produce per-frame SMPL pose parameters.
+  2. Applies the SMPL body_pose / global_orient / transl per frame as bone
+     rotations and root location keyframes. Because SMPL outputs full joint
+     rotations (including twist), no landmark-to-rotation reconstruction is
+     needed — we set the bones directly.
+  3. Applies lip sync viseme data to facial blend shapes (if available).
+  4. Adds the voice audio track.
+  5. Renders the final video with Cycles GPU.
 """
 
 import bpy
@@ -17,6 +22,8 @@ import math
 import sys
 from pathlib import Path
 from mathutils import Vector, Euler, Matrix, Quaternion
+
+import numpy as np
 
 
 def load_config() -> dict:
@@ -43,287 +50,239 @@ def clear_scene():
             bpy.data.materials.remove(block)
 
 
-def import_avatar(avatar_path: str) -> bpy.types.Object:
-    """Import a 3D avatar and return the armature object."""
-    path = Path(avatar_path)
-    ext = path.suffix.lower()
+# ─────────────────────────────────────────────────────────────────────────
+# SMPL rig + skinned mesh construction
+# ─────────────────────────────────────────────────────────────────────────
 
-    if ext == ".glb" or ext == ".gltf":
-        bpy.ops.import_scene.gltf(filepath=str(path))
-    elif ext == ".fbx":
-        bpy.ops.import_scene.fbx(filepath=str(path))
-    else:
-        raise ValueError(f"Unsupported avatar format: {ext}")
+# SMPL joint order — these 24 joint names become bone names in the armature.
+SMPL_JOINT_NAMES = [
+    "pelvis", "left_hip", "right_hip", "spine1",
+    "left_knee", "right_knee", "spine2",
+    "left_ankle", "right_ankle", "spine3",
+    "left_foot", "right_foot", "neck",
+    "left_collar", "right_collar", "head",
+    "left_shoulder", "right_shoulder",
+    "left_elbow", "right_elbow",
+    "left_wrist", "right_wrist",
+    "left_hand", "right_hand",
+]
 
-    # Find the armature
-    armature = None
-    for obj in bpy.context.selected_objects:
-        if obj.type == "ARMATURE":
-            armature = obj
-            break
+# Child joint to use as each bone's "tail" (mostly for visualization — the
+# armature's kinematic behavior is defined by head position and parenting).
+# A value of None means the bone has no natural child; we give it a small
+# offset along +Y so it's visible.
+_BONE_TAIL_CHILD = {
+    "pelvis": "spine1",
+    "left_hip": "left_knee",
+    "right_hip": "right_knee",
+    "spine1": "spine2",
+    "left_knee": "left_ankle",
+    "right_knee": "right_ankle",
+    "spine2": "spine3",
+    "left_ankle": "left_foot",
+    "right_ankle": "right_foot",
+    "spine3": "neck",
+    "left_foot": None,
+    "right_foot": None,
+    "neck": "head",
+    "left_collar": "left_shoulder",
+    "right_collar": "right_shoulder",
+    "head": None,
+    "left_shoulder": "left_elbow",
+    "right_shoulder": "right_elbow",
+    "left_elbow": "left_wrist",
+    "right_elbow": "right_wrist",
+    "left_wrist": "left_hand",
+    "right_wrist": "right_hand",
+    "left_hand": None,
+    "right_hand": None,
+}
 
-    if armature is None:
-        # Look in all scene objects
-        for obj in bpy.data.objects:
-            if obj.type == "ARMATURE":
-                armature = obj
-                break
 
-    if armature is None:
-        # Some glTF models import bones as Empty objects — print what we got
-        print("WARNING: No armature found. Objects in scene:")
-        for obj in bpy.data.objects:
-            print(f"  - {obj.name} (type={obj.type})")
+def build_smpl_avatar(rig_path: str, mesh_path: str) -> bpy.types.Object:
+    """
+    Build an SMPL armature + skinned mesh from the files exported by the
+    tracking stage. Returns the armature object.
 
-        # Try to find any mesh and proceed without armature
-        # The render will still work, just without pose animation
-        for obj in bpy.data.objects:
-            if obj.type == "MESH":
-                print(f"Using mesh object '{obj.name}' without armature")
-                return None
+    rig_path:  smpl_rig.json  — rest joint positions + parents + betas
+    mesh_path: smpl_mesh.npz  — v_template, faces, weights
+    """
+    rig = json.loads(Path(rig_path).read_text())
+    joint_names = rig["joint_names"]  # 24 names
+    rest_joints = np.array(rig["rest_joints"], dtype=np.float32)  # (24, 3)
+    parents = rig["parents"]                                      # list of 24 ints
 
-        raise RuntimeError("No armature or mesh found in imported avatar")
+    npz = np.load(mesh_path)
+    v_template = npz["v_template"]  # (6890, 3)
+    faces = npz["faces"]             # (13776, 3)
+    weights = npz["weights"]         # (6890, 24)
 
+    print(f"Building SMPL avatar: {len(joint_names)} joints, "
+          f"{len(v_template)} verts, {len(faces)} faces")
+
+    # 1. Create armature
+    arm_data = bpy.data.armatures.new("SMPL_Armature")
+    armature = bpy.data.objects.new("SMPL_Avatar", arm_data)
+    bpy.context.scene.collection.objects.link(armature)
+    bpy.context.view_layer.objects.active = armature
+
+    bpy.ops.object.mode_set(mode="EDIT")
+    edit_bones = arm_data.edit_bones
+
+    # Create all bones with head at their rest joint position
+    for i, name in enumerate(joint_names):
+        eb = edit_bones.new(name)
+        head = Vector(rest_joints[i].tolist())
+        child_name = _BONE_TAIL_CHILD.get(name)
+        if child_name is not None and child_name in joint_names:
+            child_idx = joint_names.index(child_name)
+            tail = Vector(rest_joints[child_idx].tolist())
+        else:
+            # Leaf joint — use a small offset along +Y
+            tail = head + Vector((0, 0, 0.05))
+        # Guard against zero-length bones
+        if (tail - head).length < 1e-5:
+            tail = head + Vector((0, 0, 0.02))
+        eb.head = head
+        eb.tail = tail
+
+    # Wire up parents
+    for i, name in enumerate(joint_names):
+        p = parents[i]
+        if p is not None and p >= 0:
+            edit_bones[name].parent = edit_bones[joint_names[p]]
+            # Don't connect — parent tail rarely coincides with child head
+            edit_bones[name].use_connect = False
+
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    # 2. Create mesh
+    mesh = bpy.data.meshes.new("SMPL_Mesh")
+    mesh_obj = bpy.data.objects.new("SMPL_Body", mesh)
+    bpy.context.scene.collection.objects.link(mesh_obj)
+
+    mesh.from_pydata(v_template.tolist(), [], faces.tolist())
+    mesh.update()
+
+    # 3. Vertex groups (one per joint)
+    for name in joint_names:
+        mesh_obj.vertex_groups.new(name=name)
+
+    # 4. Assign skinning weights. Only write non-trivial weights to keep it fast.
+    weight_threshold = 1e-4
+    for v_idx in range(weights.shape[0]):
+        w_row = weights[v_idx]
+        for j_idx in range(weights.shape[1]):
+            w = float(w_row[j_idx])
+            if w > weight_threshold:
+                mesh_obj.vertex_groups[joint_names[j_idx]].add([v_idx], w, "REPLACE")
+
+    # 5. Parent mesh to armature with an armature modifier
+    mesh_obj.parent = armature
+    mod = mesh_obj.modifiers.new(name="Armature", type="ARMATURE")
+    mod.object = armature
+    mod.use_vertex_groups = True
+
+    # 6. Simple material so the body isn't invisible in Cycles
+    mat = bpy.data.materials.new(name="SMPL_Skin")
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    if bsdf:
+        bsdf.inputs["Base Color"].default_value = (0.85, 0.72, 0.62, 1.0)
+        bsdf.inputs["Roughness"].default_value = 0.6
+    mesh_obj.data.materials.append(mat)
+
+    bpy.context.view_layer.objects.active = armature
+    print("SMPL avatar built successfully")
     return armature
 
 
-# MediaPipe landmark → common bone name mapping
-# This maps MediaPipe pose landmarks to typical armature bone names
-# Adjust these mappings based on your specific avatar rig
-LANDMARK_TO_BONE = {
-    "left_shoulder": "LeftArm",
-    "right_shoulder": "RightArm",
-    "left_elbow": "LeftForeArm",
-    "right_elbow": "RightForeArm",
-    "left_wrist": "LeftHand",
-    "right_wrist": "RightHand",
-    "left_hip": "LeftUpLeg",
-    "right_hip": "RightUpLeg",
-    "left_knee": "LeftLeg",
-    "right_knee": "RightLeg",
-    "left_ankle": "LeftFoot",
-    "right_ankle": "RightFoot",
-    "nose": "Head",
-}
+# ─────────────────────────────────────────────────────────────────────────
+# SMPL pose application
+# ─────────────────────────────────────────────────────────────────────────
 
-# Alternative bone name formats (Mixamo, Rigify, etc.)
-BONE_NAME_VARIANTS = {
-    "LeftArm": ["LeftArm", "mixamorig:LeftArm", "Left_Arm", "upper_arm.L", "arm.L"],
-    "RightArm": ["RightArm", "mixamorig:RightArm", "Right_Arm", "upper_arm.R", "arm.R"],
-    "LeftForeArm": ["LeftForeArm", "mixamorig:LeftForeArm", "Left_ForeArm", "forearm.L"],
-    "RightForeArm": ["RightForeArm", "mixamorig:RightForeArm", "Right_ForeArm", "forearm.R"],
-    "LeftHand": ["LeftHand", "mixamorig:LeftHand", "Left_Hand", "hand.L"],
-    "RightHand": ["RightHand", "mixamorig:RightHand", "Right_Hand", "hand.R"],
-    "LeftUpLeg": ["LeftUpLeg", "mixamorig:LeftUpLeg", "Left_UpLeg", "thigh.L", "upper_leg.L"],
-    "RightUpLeg": ["RightUpLeg", "mixamorig:RightUpLeg", "Right_UpLeg", "thigh.R", "upper_leg.R"],
-    "LeftLeg": ["LeftLeg", "mixamorig:LeftLeg", "Left_Leg", "shin.L", "lower_leg.L"],
-    "RightLeg": ["RightLeg", "mixamorig:RightLeg", "Right_Leg", "shin.R", "lower_leg.R"],
-    "LeftFoot": ["LeftFoot", "mixamorig:LeftFoot", "Left_Foot", "foot.L"],
-    "RightFoot": ["RightFoot", "mixamorig:RightFoot", "Right_Foot", "foot.R"],
-    "Head": ["Head", "mixamorig:Head", "head"],
-    "Hips": ["Hips", "mixamorig:Hips", "hips", "root", "Root"],
-    "Spine": ["Spine", "mixamorig:Spine", "spine", "Spine1"],
-}
+def _axis_angle_to_quat(aa) -> Quaternion:
+    """Convert a 3-vector axis-angle rotation to a Blender Quaternion."""
+    x, y, z = float(aa[0]), float(aa[1]), float(aa[2])
+    angle = math.sqrt(x * x + y * y + z * z)
+    if angle < 1e-8:
+        return Quaternion((1.0, 0.0, 0.0, 0.0))
+    axis = Vector((x / angle, y / angle, z / angle))
+    return Quaternion(axis, angle)
 
 
-def find_bone(armature: bpy.types.Object, canonical_name: str) -> str | None:
-    """Find a bone by trying multiple naming conventions."""
-    variants = BONE_NAME_VARIANTS.get(canonical_name, [canonical_name])
-    bone_names = [b.name for b in armature.data.bones]
-
-    for variant in variants:
-        if variant in bone_names:
-            return variant
-
-    # Case-insensitive fallback
-    for variant in variants:
-        for bn in bone_names:
-            if bn.lower() == variant.lower():
-                return bn
-
-    return None
-
-
-def mediapipe_to_blender(lm: dict) -> Vector:
-    """Convert a MediaPipe landmark to Blender coordinate space.
-    MediaPipe: X=right, Y=down, Z=toward camera
-    Blender:   X=right, Y=forward (into screen), Z=up
-    """
-    return Vector((lm["x"], -lm["z"], -lm["y"]))
-
-
-def compute_pose_rotation(pose_bone, target_direction: Vector):
-    """
-    Compute the pose bone quaternion that points the bone in target_direction
-    (given in armature space), properly converted to bone-local space.
-    """
-    bone = pose_bone.bone
-
-    # Bone rest direction in armature space
-    rest_dir = (bone.tail_local - bone.head_local).normalized()
-
-    if target_direction.length < 0.001:
-        return None
-
-    # Delta rotation from rest direction to target direction (in armature space)
-    armature_delta = rest_dir.rotation_difference(target_direction)
-
-    # Target bone matrix in armature space = delta applied to rest matrix
-    rest_mat = bone.matrix_local
-    target_mat = armature_delta.to_matrix().to_4x4() @ rest_mat
-
-    # Convert both to bone-local space (relative to parent rest pose)
-    if bone.parent:
-        parent_inv = bone.parent.matrix_local.inverted()
-        local_target = parent_inv @ target_mat
-        local_rest = parent_inv @ rest_mat
-    else:
-        local_target = target_mat
-        local_rest = rest_mat
-
-    # Pose rotation = rest_local^-1 @ target_local
-    pose_rot = local_rest.to_quaternion().inverted() @ local_target.to_quaternion()
-    return pose_rot
+# SMPL global frame (Y-up) → Blender world (Z-up).
+# MediaPipe/SMPL convention: +X right, +Y up, +Z forward (out of screen)
+# Blender world:              +X right, +Y forward (into screen), +Z up
+# Rotation that sends SMPL → Blender: rotate +90° about X
+_SMPL_TO_BLENDER = Quaternion((1, 0, 0), math.radians(90))
 
 
 def apply_tracking(armature: bpy.types.Object, tracking_data: dict):
-    """Apply MediaPipe body tracking data to the armature as keyframes."""
-    frames = tracking_data["frames"]
-    fps = tracking_data["fps"]
+    """
+    Apply per-frame SMPL pose parameters (from GVHMR) to the SMPL armature.
 
-    # Enter pose mode
+    tracking_data schema (from src/stages/tracking.py):
+      {
+        "fps": float,
+        "total_frames": int,
+        "joint_names": [24 names],
+        "betas": [10 floats],
+        "frames": [
+            {"frame": int, "global_orient": [3], "body_pose": [63], "transl": [3]},
+            ...
+        ]
+      }
+    """
+    frames = tracking_data["frames"]
+    joint_names = tracking_data.get("joint_names", SMPL_JOINT_NAMES)
+    total = len(frames)
+
     bpy.context.view_layer.objects.active = armature
     bpy.ops.object.mode_set(mode="POSE")
 
-    # Set rotation mode to quaternion for all pose bones
     for pb in armature.pose.bones:
         pb.rotation_mode = "QUATERNION"
 
-    # Map bones
-    bone_map = {}
-    for canonical in BONE_NAME_VARIANTS:
-        actual = find_bone(armature, canonical)
-        if actual:
-            bone_map[canonical] = actual
+    pelvis_bone = armature.pose.bones.get(joint_names[0])
+    if pelvis_bone is None:
+        raise RuntimeError(f"Pelvis bone '{joint_names[0]}' not found in armature")
 
-    print(f"Mapped {len(bone_map)} bones: {list(bone_map.keys())}")
-
-    # Print bone hierarchy for debugging
-    for canonical, actual_name in bone_map.items():
-        bone = armature.data.bones.get(actual_name)
-        if bone:
-            parent_name = bone.parent.name if bone.parent else "None"
-            rest_dir = (bone.tail_local - bone.head_local).normalized()
-            print(f"  {canonical} -> {actual_name} (parent: {parent_name}, rest_dir: {rest_dir})")
-
-    # Limb pairs: (parent_landmark, child_landmark, bone_canonical)
-    limb_pairs = [
-        ("left_shoulder", "left_elbow", "LeftArm"),
-        ("left_elbow", "left_wrist", "LeftForeArm"),
-        ("right_shoulder", "right_elbow", "RightArm"),
-        ("right_elbow", "right_wrist", "RightForeArm"),
-        ("left_hip", "left_knee", "LeftUpLeg"),
-        ("left_knee", "left_ankle", "LeftLeg"),
-        ("right_hip", "right_knee", "RightUpLeg"),
-        ("right_knee", "right_ankle", "RightLeg"),
-    ]
-
-    # Spine tracking: use shoulders midpoint → nose direction
-    spine_pairs = [
-        ("Spine", "left_shoulder", "right_shoulder", "nose"),
-    ]
-
-    tracked_frame_count = 0
-    # For smoothing: store previous rotations per bone
-    prev_rotations = {}
-    smooth_factor = 0.3  # 0 = no smoothing, 1 = completely frozen
-
-    # Process each frame
+    tracked = 0
     for frame_data in frames:
-        frame_idx = frame_data["frame"]
-        landmarks = frame_data.get("world_landmarks") or frame_data.get("landmarks")
-
-        if landmarks is None:
-            continue
-
-        # Build landmark dict by name
-        lm_dict = {lm["name"]: lm for lm in landmarks}
-
+        frame_idx = int(frame_data["frame"])
         bpy.context.scene.frame_set(frame_idx)
 
-        # Apply root (hip) position
-        hips_bone_name = bone_map.get("Hips")
-        if hips_bone_name and "left_hip" in lm_dict and "right_hip" in lm_dict:
-            pose_bone = armature.pose.bones.get(hips_bone_name)
-            if pose_bone:
-                lh = mediapipe_to_blender(lm_dict["left_hip"])
-                rh = mediapipe_to_blender(lm_dict["right_hip"])
-                scale = 2.0
-                hip_center = (lh + rh) / 2 * scale
-                pose_bone.location = hip_center
-                pose_bone.keyframe_insert(data_path="location", frame=frame_idx)
+        global_orient = frame_data["global_orient"]       # (3,) axis-angle
+        body_pose_flat = frame_data["body_pose"]          # (63,) 21 joints * 3
+        transl = frame_data["transl"]                     # (3,) world translation
 
-        # Apply limb rotations
-        for parent_lm, child_lm, bone_canonical in limb_pairs:
-            if parent_lm not in lm_dict or child_lm not in lm_dict:
+        # Pelvis: global orientation + translation
+        pelvis_q = _SMPL_TO_BLENDER @ _axis_angle_to_quat(global_orient)
+        pelvis_bone.rotation_quaternion = pelvis_q
+        pelvis_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_idx)
+
+        # Convert translation from SMPL Y-up to Blender Z-up
+        tx, ty, tz = float(transl[0]), float(transl[1]), float(transl[2])
+        pelvis_bone.location = Vector((tx, -tz, ty))
+        pelvis_bone.keyframe_insert(data_path="location", frame=frame_idx)
+
+        # body_pose is 63-dim = 21 joints (indices 1..21 in SMPL) × 3
+        # Joint indices 22 and 23 are hands, not included in body_pose.
+        for j in range(1, 22):
+            aa = body_pose_flat[(j - 1) * 3:(j - 1) * 3 + 3]
+            bone = armature.pose.bones.get(joint_names[j])
+            if bone is None:
                 continue
+            bone.rotation_quaternion = _axis_angle_to_quat(aa)
+            bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_idx)
 
-            actual_name = bone_map.get(bone_canonical)
-            if not actual_name:
-                continue
-
-            pose_bone = armature.pose.bones.get(actual_name)
-            if not pose_bone:
-                continue
-
-            # Compute target direction in Blender armature space
-            origin = mediapipe_to_blender(lm_dict[parent_lm])
-            target = mediapipe_to_blender(lm_dict[child_lm])
-            direction = (target - origin).normalized()
-
-            rotation = compute_pose_rotation(pose_bone, direction)
-            if rotation is not None:
-                # Apply smoothing to reduce jitter
-                if bone_canonical in prev_rotations:
-                    rotation = prev_rotations[bone_canonical].slerp(rotation, 1.0 - smooth_factor)
-                prev_rotations[bone_canonical] = rotation.copy()
-
-                pose_bone.rotation_quaternion = rotation
-                pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_idx)
-
-        # Apply spine rotation (shoulders midpoint toward nose)
-        for spine_bone, lm_left, lm_right, lm_target in spine_pairs:
-            if lm_left not in lm_dict or lm_right not in lm_dict or lm_target not in lm_dict:
-                continue
-            actual_name = bone_map.get(spine_bone)
-            if not actual_name:
-                continue
-            pose_bone = armature.pose.bones.get(actual_name)
-            if not pose_bone:
-                continue
-
-            left = mediapipe_to_blender(lm_dict[lm_left])
-            right = mediapipe_to_blender(lm_dict[lm_right])
-            head = mediapipe_to_blender(lm_dict[lm_target])
-            mid_shoulder = (left + right) / 2
-            direction = (head - mid_shoulder).normalized()
-
-            rotation = compute_pose_rotation(pose_bone, direction)
-            if rotation is not None:
-                if spine_bone in prev_rotations:
-                    rotation = prev_rotations[spine_bone].slerp(rotation, 1.0 - smooth_factor)
-                prev_rotations[spine_bone] = rotation.copy()
-
-                pose_bone.rotation_quaternion = rotation
-                pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_idx)
-
-        tracked_frame_count += 1
-
-        if tracked_frame_count % 200 == 0:
-            print(f"Applied tracking: {tracked_frame_count} frames processed")
+        tracked += 1
+        if tracked % 200 == 0:
+            print(f"Applied SMPL pose: {tracked}/{total} frames")
 
     bpy.ops.object.mode_set(mode="OBJECT")
-    print(f"Applied tracking to {tracked_frame_count} frames")
+    print(f"Applied SMPL pose to {tracked} frames")
 
 
 def apply_lipsync(armature: bpy.types.Object, lipsync_data: dict, fps: float):
@@ -495,28 +454,35 @@ def main():
     # Clean slate
     clear_scene()
 
-    # Import avatar
-    print(f"Importing avatar: {config['avatar_path']}")
-    armature = import_avatar(config["avatar_path"])
+    # Build SMPL avatar from data exported by the tracking stage.
+    # The tracking stage writes smpl_rig.json + smpl_mesh.npz alongside
+    # tracking.json in the tracking stage output directory.
+    tracking_path = Path(config["tracking_path"])
+    tracking_dir = tracking_path.parent
+    rig_path = tracking_dir / "smpl_rig.json"
+    mesh_path = tracking_dir / "smpl_mesh.npz"
+
+    if not rig_path.exists() or not mesh_path.exists():
+        raise RuntimeError(
+            f"SMPL rig/mesh data not found in {tracking_dir}. "
+            "Re-run the tracking stage with the GVHMR-based tracker."
+        )
+
+    print(f"Building SMPL avatar from: {rig_path.name} + {mesh_path.name}")
+    armature = build_smpl_avatar(str(rig_path), str(mesh_path))
 
     # Setup camera and lighting
     setup_camera_and_lighting()
 
-    # Load and apply tracking data
-    print(f"Loading tracking data: {config['tracking_path']}")
-    tracking_data = json.loads(Path(config["tracking_path"]).read_text())
-    if armature is not None:
-        apply_tracking(armature, tracking_data)
-    else:
-        print("Skipping tracking — no armature available")
+    # Load and apply tracking data (SMPL pose params per frame)
+    print(f"Loading tracking data: {tracking_path}")
+    tracking_data = json.loads(tracking_path.read_text())
+    apply_tracking(armature, tracking_data)
 
     # Load and apply lip sync
     print(f"Loading lip sync data: {config['lipsync_path']}")
     lipsync_data = json.loads(Path(config["lipsync_path"]).read_text())
-    if armature is not None:
-        apply_lipsync(armature, lipsync_data, float(config["fps"]))
-    else:
-        print("Skipping lip sync — no armature available")
+    apply_lipsync(armature, lipsync_data, float(config["fps"]))
 
     # Add audio
     print(f"Adding audio: {config['voice_path']}")

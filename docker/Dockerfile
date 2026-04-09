@@ -1,14 +1,20 @@
-FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:12.2.2-cudnn8-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV CUDA_HOME=/usr/local/cuda
 
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-venv \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3.10-venv \
+    python3.10-dev \
     python3-pip \
+    build-essential \
     ffmpeg \
     git \
     wget \
@@ -30,16 +36,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && ldconfig
 
+# Set python3.10 as default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
+
 # Install Blender 4.2 LTS (apt only has 3.0 which is too old)
 RUN wget -q https://mirror.clarkson.edu/blender/release/Blender4.2/blender-4.2.0-linux-x64.tar.xz \
     -O /tmp/blender.tar.xz \
     && tar -xf /tmp/blender.tar.xz -C /opt/ \
     && ln -sf /opt/blender-4.2.0-linux-x64/blender /usr/local/bin/blender \
     && rm /tmp/blender.tar.xz
-
-# Set python3.11 as default
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
 
 # Install Rhubarb Lip Sync
 RUN wget -q https://github.com/DanielSWolf/rhubarb-lip-sync/releases/download/v1.13.0/Rhubarb-Lip-Sync-1.13.0-Linux.zip \
@@ -61,16 +68,27 @@ RUN wget -q https://github.com/rhasspy/piper/releases/download/2023.11.14-2/pipe
 # Create app directory
 WORKDIR /app
 
-# Install Python dependencies
+# Install Python dependencies (main pipeline env)
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
+
+# Install GVHMR (3D human pose tracker, SMPL output)
+# GVHMR produces world-grounded SMPL parameters from monocular video.
+# Repo: https://github.com/zju3dv/GVHMR
+RUN git clone --depth 1 https://github.com/zju3dv/GVHMR.git /opt/gvhmr \
+    && cd /opt/gvhmr \
+    && pip install --no-cache-dir -r requirements.txt || true \
+    && pip install --no-cache-dir -e . || true
+
+ENV GVHMR_ROOT=/opt/gvhmr
+ENV PYTHONPATH=/opt/gvhmr:/app:$PYTHONPATH
 
 # Copy application code
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p /app/models /app/workspace /app/avatars
+RUN mkdir -p /app/models /app/workspace /app/avatars /app/models/smpl /app/models/gvhmr
 
 EXPOSE 7860
 

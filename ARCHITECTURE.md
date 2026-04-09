@@ -17,7 +17,7 @@ runs on consumer hardware (NVIDIA 3090 / 3080 Ti) with zero paid services.
                                                                       │
 ┌──────────┐   ┌────────────────┐   ┌──────────────┐                  │
 │ Upload   │◀──│ Blender Render │◀──│ Body Tracking │◀── original video
-│ (YT API) │   │  (headless)    │   │ (MediaPipe)   │                  │
+│ (YT API) │   │  (headless)    │   │ (GVHMR/SMPL)  │                  │
 └──────────┘   └────────────────┘   └──────────────┘◀──── lip sync ───┘
                       ▲
                       │
@@ -35,9 +35,9 @@ runs on consumer hardware (NVIDIA 3090 / 3080 Ti) with zero paid services.
 | 2 | **Transcribe** | faster-whisper (large-v3) | video.mp4 | transcript.json (word-level timestamps) | Yes |
 | 3 | **Rewrite** | Ollama (Llama 3 8B) | transcript.json | rewritten_transcript.json | Yes |
 | 4 | **Voice** | Piper TTS | rewritten_transcript.json | voice.wav | CPU (fast) |
-| 5 | **Body Tracking** | MediaPipe Pose | video.mp4 | tracking.json (per-frame 33 landmarks) | Yes |
+| 5 | **Body Tracking** | GVHMR (SMPL output) + smplx | video.mp4 | tracking.json (SMPL pose params) + smpl_rig.json + smpl_mesh.npz | Yes |
 | 6 | **Lip Sync** | Rhubarb Lip Sync | voice.wav | lipsync.json (phoneme timestamps) | No |
-| 7 | **Blender Render** | Blender 4.x (headless) | avatar.glb + tracking + lipsync + voice.wav | output.mp4 | GPU |
+| 7 | **Blender Render** | Blender 4.x (headless, Cycles CUDA) | SMPL rig + mesh + tracking + lipsync + voice.wav | output.mp4 | GPU |
 | 8 | **Metadata** | Ollama + PIL/SD | transcript + video frame | title, desc, tags, thumbnail.png | Yes |
 | 9 | **Upload** | YouTube Data API v3 | output.mp4 + metadata | Published video | No |
 
@@ -45,9 +45,25 @@ runs on consumer hardware (NVIDIA 3090 / 3080 Ti) with zero paid services.
 
 - **faster-whisper** over OpenAI Whisper: 4x faster with identical accuracy, lower VRAM
 - **Piper TTS** over Coqui: lightweight, consistent quality, no voice cloning needed
-- **MediaPipe** over OpenPose: easier setup, Apache-licensed, Docker-friendly
+- **GVHMR** over MediaPipe: regresses full SMPL parameters (joint rotations
+  including twist/roll, fixed bone lengths, gravity-aligned world motion)
+  instead of bare landmark positions. MediaPipe only gives 3D points, which
+  leaves bone twist unconstrained — catastrophic for yoga retargeting.
+- **SMPL rig built in-Blender from pre-computed data**: the tracking stage
+  runs `smplx` once to bake out rest joint positions, skinning weights, and
+  faces; Blender's bundled Python doesn't need torch or smplx installed.
 - **Rhubarb Lip Sync**: generates viseme/phoneme data from audio for 3D blend shapes
 - **Stages run sequentially**: only one model in VRAM at a time (fits 3080 Ti too)
+
+### Required model file (one-time user action)
+
+GVHMR + smplx need the SMPL body model, which MPI distributes via a free
+non-commercial registration:
+
+1. Register at https://smpl.is.tue.mpg.de/
+2. Download **SMPL_python_v.1.1.0** (or similar), extract `SMPL_NEUTRAL.pkl`
+3. Place it at `models/smpl/SMPL_NEUTRAL.pkl` (this is volume-mounted into
+   the container)
 
 ## Job Queue & Orchestration
 
@@ -85,14 +101,14 @@ youtube-automation/
 │   │   ├── transcribe.py      # faster-whisper
 │   │   ├── rewrite.py         # Ollama LLM
 │   │   ├── voice.py           # Piper TTS
-│   │   ├── tracking.py        # MediaPipe body pose
+│   │   ├── tracking.py        # GVHMR → SMPL pose params
 │   │   ├── lipsync.py         # Rhubarb Lip Sync
 │   │   ├── blender_render.py  # Blender headless via subprocess
 │   │   ├── metadata.py        # Title/desc/tags/thumbnail
 │   │   └── upload.py          # YouTube Data API v3
 │   ├── blender_scripts/
 │   │   ├── setup_scene.py     # Import avatar, configure scene
-│   │   ├── apply_tracking.py  # Map MediaPipe data → armature
+│   │   ├── apply_tracking.py  # Apply SMPL pose params → armature
 │   │   ├── apply_lipsync.py   # Drive viseme blend shapes
 │   │   └── render.py          # Final render to video
 │   └── ui/

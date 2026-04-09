@@ -1,12 +1,14 @@
 """
-Stage 7: Blender headless render — import avatar, apply tracking + lip sync, render video.
+Stage 7: Blender headless render — build SMPL avatar from tracking data,
+apply SMPL pose + lip sync, render video.
 
 Calls Blender as a subprocess with a Python script that:
-  1. Imports the avatar model (.glb/.fbx)
-  2. Applies body pose tracking data to the armature
-  3. Applies lip sync viseme data to blend shapes
-  4. Sets up audio (voice.wav)
-  5. Renders the final video
+  1. Builds an SMPL armature + skinned mesh from smpl_rig.json + smpl_mesh.npz
+     (exported by the tracking stage).
+  2. Applies per-frame SMPL pose parameters from tracking.json.
+  3. Applies lip sync viseme data to blend shapes (no-op if the mesh has none).
+  4. Sets up audio (voice.wav).
+  5. Renders the final video.
 
 Outputs:
   - output.mp4 — the final rendered video with new audio
@@ -32,24 +34,25 @@ class BlenderRenderStage(Stage):
 
     def run(self, job_id: str, out_dir: Path) -> dict[str, Any]:
         # Gather all inputs
-        tracking_path = self.prev_stage_dir(job_id, "tracking") / "tracking.json"
+        tracking_dir = self.prev_stage_dir(job_id, "tracking")
+        tracking_path = tracking_dir / "tracking.json"
+        smpl_rig = tracking_dir / "smpl_rig.json"
+        smpl_mesh = tracking_dir / "smpl_mesh.npz"
         lipsync_path = self.prev_stage_dir(job_id, "lipsync") / "lipsync.json"
         voice_path = self.prev_stage_dir(job_id, "voice") / "voice.wav"
 
         for path, label in [
             (tracking_path, "tracking data"),
+            (smpl_rig, "SMPL rig"),
+            (smpl_mesh, "SMPL mesh"),
             (lipsync_path, "lip sync data"),
             (voice_path, "voice audio"),
         ]:
             if not path.exists():
                 raise FileNotFoundError(f"Missing {label}: {path}")
 
-        # Find avatar file
-        avatar_path = self._find_avatar()
-
         # Build the render config that the Blender script will read
         render_config = {
-            "avatar_path": str(avatar_path),
             "tracking_path": str(tracking_path),
             "lipsync_path": str(lipsync_path),
             "voice_path": str(voice_path),
@@ -99,22 +102,3 @@ class BlenderRenderStage(Stage):
         logger.info("Render complete: %s (%.1f MB)", output_path, output_path.stat().st_size / 1e6)
         return {"output_path": str(output_path)}
 
-    def _find_avatar(self) -> Path:
-        """Find the avatar file to use."""
-        avatars_dir = self.config.avatars_dir
-
-        # Check for default avatar
-        default = avatars_dir / self.config.default_avatar
-        if default.exists():
-            return default
-
-        # Look for any .glb or .fbx file
-        for ext in ("*.glb", "*.fbx", "*.gltf"):
-            files = list(avatars_dir.glob(ext))
-            if files:
-                return files[0]
-
-        raise FileNotFoundError(
-            f"No avatar file found in {avatars_dir}. "
-            f"Place a .glb or .fbx file there, or set default_avatar in config."
-        )
