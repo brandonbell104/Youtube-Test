@@ -13,12 +13,12 @@ ctranslate2>=4.0.0
 # SMPL body model evaluation (for tracking and Blender rig)
 smplx>=0.1.28
 trimesh>=4.0.0
-chumpy>=0.70
+# Note: chumpy removed — won't build on Python 3.11. smplx handles
+# chumpy-encoded .pkl files with its own backward-compat unpickler.
 
-# PyTorch (GVHMR + smplx) — CUDA 12.1 wheels
---extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.3.0
-torchvision==0.18.0
+# PyTorch is installed separately in the Dockerfile as its own cached layer
+# (torch==2.3.0+cu121, torchvision==0.18.0+cu121). Do NOT list torch/torchvision
+# here — pip would try to reinstall and may pick a CPU-only build.
 
 # Video I/O
 opencv-python-headless>=4.8.0

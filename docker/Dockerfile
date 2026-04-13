@@ -5,14 +5,11 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV CUDA_HOME=/usr/local/cuda
 
-# System dependencies
+# System dependencies (includes build-essential for cython_bbox compilation)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa -y \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 \
-    python3.10-venv \
-    python3.10-dev \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
     python3-pip \
     build-essential \
     ffmpeg \
@@ -36,12 +33,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && ldconfig
 
-# Set python3.10 as default
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 \
-    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
+# Set python3.11 as default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
+    && python3.11 -m pip install --upgrade pip
 
-# Install Blender 4.2 LTS (apt only has 3.0 which is too old)
+# Install Blender 4.2 LTS
 RUN wget -q https://mirror.clarkson.edu/blender/release/Blender4.2/blender-4.2.0-linux-x64.tar.xz \
     -O /tmp/blender.tar.xz \
     && tar -xf /tmp/blender.tar.xz -C /opt/ \
@@ -65,21 +62,39 @@ RUN wget -q https://github.com/rhasspy/piper/releases/download/2023.11.14-2/pipe
     && rm /tmp/piper.tar.gz \
     && ln -s /opt/piper/piper/piper /usr/local/bin/piper
 
-# Create app directory
 WORKDIR /app
 
-# Install Python dependencies (main pipeline env)
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+# ── Step 1: Install PyTorch first (large download, cached as its own layer) ──
+RUN pip install --no-cache-dir \
+    torch==2.3.0+cu121 torchvision==0.18.0+cu121 \
+    --index-url https://download.pytorch.org/whl/cu121
 
-# Install GVHMR (3D human pose tracker, SMPL output)
-# GVHMR produces world-grounded SMPL parameters from monocular video.
-# Repo: https://github.com/zju3dv/GVHMR
-RUN git clone --depth 1 https://github.com/zju3dv/GVHMR.git /opt/gvhmr \
-    && cd /opt/gvhmr \
-    && pip install --no-cache-dir -r requirements.txt || true \
-    && pip install --no-cache-dir -e . || true
+# ── Step 2: Install our pipeline's own requirements ──
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ── Step 3: Clone GVHMR ──
+RUN git clone --depth 1 https://github.com/zju3dv/GVHMR.git /opt/gvhmr
+
+# ── Step 4: Install GVHMR deps ──
+# Exclude: pytorch3d (we provide a shim), chumpy (won't build on 3.11),
+#          numpy pinned version (let pip resolve a compatible one)
+RUN cd /opt/gvhmr \
+    && grep -v -E 'pytorch3d|chumpy|numpy==' requirements.txt > /tmp/gvhmr_reqs.txt \
+    && pip install --no-cache-dir -r /tmp/gvhmr_reqs.txt \
+    && pip install --no-cache-dir --no-deps -e .
+
+# ── Step 5: Create pytorch3d transforms shim ──
+# GVHMR uses pytorch3d.transforms for rotation conversions. The official
+# pytorch3d wheel only supports Python 3.10, and building from source takes
+# 30+ minutes. This shim reimplements the ~8 functions GVHMR actually calls.
+COPY docker/pytorch3d_shim/pytorch3d /usr/local/lib/python3.11/dist-packages/pytorch3d
+
+# ── Step 6: Verify critical imports ──
+RUN python -c "import torch; print(f'torch {torch.__version__}')" \
+    && python -c "from pytorch3d.transforms import quaternion_to_matrix; print('pytorch3d shim OK')" \
+    && python -c "import smplx; print('smplx OK')" \
+    && python -c "import lightning; print(f'lightning {lightning.__version__}')"
 
 ENV GVHMR_ROOT=/opt/gvhmr
 ENV PYTHONPATH=/opt/gvhmr:/app:$PYTHONPATH
