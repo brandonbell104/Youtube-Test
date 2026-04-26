@@ -91,7 +91,9 @@ RUN cd /opt/gvhmr \
 COPY docker/pytorch3d_shim/pytorch3d /usr/local/lib/python3.11/dist-packages/pytorch3d
 
 # ── Step 6: Verify critical imports ──
-RUN python -c "import torch; print(f'torch {torch.__version__}')" \
+# Lightning uses pkg_resources which lives in setuptools (not installed by default on 3.11)
+RUN pip install --no-cache-dir setuptools \
+    && python -c "import torch; print(f'torch {torch.__version__}')" \
     && python -c "from pytorch3d.transforms import quaternion_to_matrix; print('pytorch3d shim OK')" \
     && python -c "import smplx; print('smplx OK')" \
     && python -c "import lightning; print(f'lightning {lightning.__version__}')"
