@@ -82,7 +82,8 @@ RUN git clone --depth 1 https://github.com/zju3dv/GVHMR.git /opt/gvhmr
 RUN cd /opt/gvhmr \
     && grep -v -E 'pytorch3d|chumpy|numpy==' requirements.txt > /tmp/gvhmr_reqs.txt \
     && pip install --no-cache-dir -r /tmp/gvhmr_reqs.txt \
-    && pip install --no-cache-dir --no-deps -e .
+    && pip install --no-cache-dir --no-deps -e . \
+    && pip install --no-cache-dir yacs gdown iopath
 
 # ── Step 5: Create pytorch3d transforms shim ──
 # GVHMR uses pytorch3d.transforms for rotation conversions. The official
