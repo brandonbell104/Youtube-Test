@@ -4,6 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV CUDA_HOME=/usr/local/cuda
+ENV PYTORCH_JIT=0
 
 # System dependencies (includes build-essential for cython_bbox compilation)
 RUN apt-get update && apt-get install -y --no-install-recommends \
