@@ -98,7 +98,9 @@ COPY docker/pytorch3d_shim/pytorch3d /opt/gvhmr/pytorch3d
 # Lightning uses pkg_resources which lives in setuptools (not installed by default on 3.11)
 RUN pip install --no-cache-dir 'setuptools<71' \
     && python -c "import torch; print(f'torch {torch.__version__}')" \
-    && python -c "from pytorch3d.transforms import quaternion_to_matrix; print('pytorch3d shim OK')" \
+    && python -c "from pytorch3d.transforms import quaternion_to_matrix, so3_exp_map, euler_angles_to_matrix; print('pytorch3d shim OK')" \
+    && python -c "from pytorch3d.renderer import look_at_rotation; print('pytorch3d renderer stub OK')" \
+    && python -c "from pytorch3d.structures import Meshes; print('pytorch3d structures stub OK')" \
     && python -c "import smplx; print('smplx OK')" \
     && python -c "import lightning; print(f'lightning {lightning.__version__}')"
 
