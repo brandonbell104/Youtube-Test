@@ -88,7 +88,10 @@ RUN cd /opt/gvhmr \
 # GVHMR uses pytorch3d.transforms for rotation conversions. The official
 # pytorch3d wheel only supports Python 3.10, and building from source takes
 # 30+ minutes. This shim reimplements the ~8 functions GVHMR actually calls.
+# Install to both dist-packages (for our code) and /opt/gvhmr (on PYTHONPATH,
+# so GVHMR's subprocess can find it too).
 COPY docker/pytorch3d_shim/pytorch3d /usr/local/lib/python3.11/dist-packages/pytorch3d
+COPY docker/pytorch3d_shim/pytorch3d /opt/gvhmr/pytorch3d
 
 # ── Step 6: Verify critical imports ──
 # Lightning uses pkg_resources which lives in setuptools (not installed by default on 3.11)
