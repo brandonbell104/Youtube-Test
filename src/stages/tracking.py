@@ -25,8 +25,10 @@ Outputs (written to the stage output directory):
 
 import json
 import logging
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -142,17 +144,25 @@ class TrackingStage(Stage):
         gvhmr_output_root.mkdir(parents=True, exist_ok=True)
 
         cmd = [
-            "python", str(demo_script),
+            sys.executable, str(demo_script),
             f"--video={video_path}",
             f"--output_root={gvhmr_output_root}",
         ]
         if self.config.tracking_static_camera:
             cmd.append("-s")
 
+        env = os.environ.copy()
+        env["PYTHONPATH"] = ":".join([
+            str(gvhmr_root),
+            "/usr/local/lib/python3.11/dist-packages",
+            env.get("PYTHONPATH", ""),
+        ])
+
         logger.info("Running GVHMR: %s", " ".join(cmd))
         proc = subprocess.run(
             cmd,
             cwd=str(gvhmr_root),
+            env=env,
             capture_output=True,
             text=True,
             timeout=3600,
