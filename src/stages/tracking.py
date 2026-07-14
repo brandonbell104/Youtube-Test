@@ -140,6 +140,16 @@ class TrackingStage(Stage):
                 "Check that GVHMR_ROOT is set correctly in the container."
             )
 
+        # Preflight: GVHMR needs its pretrained checkpoints in place, or the
+        # demo dies deep inside hydra with a confusing stack trace.
+        ckpt = gvhmr_root / "inputs" / "checkpoints" / "gvhmr" / "gvhmr_siga24_release.ckpt"
+        if not ckpt.exists():
+            raise FileNotFoundError(
+                f"GVHMR checkpoint not found at {ckpt}. Run "
+                "`python scripts/setup_models.py` (inside the container) to "
+                "download the pretrained models into models/gvhmr/."
+            )
+
         gvhmr_output_root = out_dir / "gvhmr_out"
         gvhmr_output_root.mkdir(parents=True, exist_ok=True)
 

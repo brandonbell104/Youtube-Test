@@ -187,14 +187,17 @@ def _axis_angle_to_quat(aa) -> Quaternion:
     return Quaternion(axis, angle)
 
 
-def apply_tracking(armature: bpy.types.Object, tracking_data: dict, render_fps: float):
+def apply_tracking(armature: bpy.types.Object, tracking_data: dict,
+                   render_fps: float, time_scale: float = 1.0):
     """
     Apply per-frame SMPL pose parameters (from GVHMR) to the SMPL armature.
 
     Keyframes are resampled from the source video's fps (tracking_data["fps"])
     to the render fps, so motion plays back at real-time speed regardless of
-    what fps the original video used. All rotations/translations are assigned
-    in SMPL (Y-up) space directly — the armature object itself is rotated to
+    what fps the original video used. time_scale further stretches (>1) or
+    compresses (<1) the motion in time, used to sync it to the length of the
+    newly generated narration. All rotations/translations are assigned in
+    SMPL (Y-up) space directly — the armature object itself is rotated to
     Z-up in build_smpl_avatar(), and bones are built with identity rest
     orientation, so no per-bone coordinate conversion is needed.
 
@@ -214,7 +217,7 @@ def apply_tracking(armature: bpy.types.Object, tracking_data: dict, render_fps: 
     joint_names = tracking_data.get("joint_names", SMPL_JOINT_NAMES)
     total = len(frames)
     src_fps = float(tracking_data.get("fps") or render_fps)
-    frame_scale = render_fps / src_fps
+    frame_scale = (render_fps / src_fps) * time_scale
 
     bpy.context.view_layer.objects.active = armature
     bpy.ops.object.mode_set(mode="POSE")
@@ -361,23 +364,32 @@ def setup_render_settings(config: dict):
     """Configure render settings."""
     scene = bpy.context.scene
 
-    # Use Cycles with CUDA GPU rendering
+    # Use Cycles with CUDA GPU rendering; fall back to CPU rather than
+    # crashing if no CUDA device is visible (e.g. WSL2 driver hiccups).
     scene.render.engine = "CYCLES"
-    prefs = bpy.context.preferences.addons["cycles"].preferences
-    prefs.compute_device_type = "CUDA"
-    prefs.get_devices()
-    for device in prefs.devices:
-        if device.type == "CUDA":
-            device.use = True
-            print(f"  GPU enabled: {device.name}")
-        else:
-            device.use = False
-    scene.cycles.device = "GPU"
+    cuda_devices = []
+    try:
+        prefs = bpy.context.preferences.addons["cycles"].preferences
+        prefs.compute_device_type = "CUDA"
+        prefs.get_devices()
+        for device in prefs.devices:
+            device.use = device.type == "CUDA"
+            if device.use:
+                cuda_devices.append(device.name)
+    except Exception as e:
+        print(f"WARNING: CUDA setup failed ({e})")
+
+    if cuda_devices:
+        scene.cycles.device = "GPU"
+        print(f"Using Cycles GPU (CUDA): {', '.join(cuda_devices)}")
+    else:
+        scene.cycles.device = "CPU"
+        print("WARNING: no CUDA device found — rendering on CPU (slow!)")
+
     scene.cycles.samples = 16
     scene.cycles.use_denoising = False  # Denoising runs on CPU and is the bottleneck
     scene.cycles.use_adaptive_sampling = True
     scene.cycles.adaptive_threshold = 0.1
-    print("Using Cycles GPU (CUDA) rendering — 16 samples, no denoising")
     scene.render.resolution_x = config["resolution_x"]
     scene.render.resolution_y = config["resolution_y"]
     scene.render.fps = config["fps"]
@@ -456,27 +468,50 @@ def main():
     print(f"Loading tracking data: {tracking_path}")
     tracking_data = json.loads(tracking_path.read_text())
     render_fps = float(config["fps"])
-    apply_tracking(armature, tracking_data, render_fps)
+
+    # Sync the motion length to the new narration. The rewritten TTS audio
+    # is never the same length as the source video, so by default we
+    # time-stretch the motion to span the audio exactly ("stretch").
+    # "freeze" keeps real-time motion and holds the last pose instead.
+    time_scale = 1.0
+    src_fps = float(tracking_data.get("fps") or render_fps)
+    total_frames = tracking_data.get("total_frames", len(tracking_data["frames"]))
+    motion_duration = total_frames / src_fps if src_fps > 0 else 0.0
+    audio_duration = float(config.get("audio_duration") or 0.0)
+    motion_sync = config.get("motion_sync", "stretch")
+
+    if motion_sync == "stretch" and audio_duration > 0 and motion_duration > 0:
+        time_scale = audio_duration / motion_duration
+        print(f"Motion sync: stretch x{time_scale:.3f} "
+              f"(motion {motion_duration:.1f}s → audio {audio_duration:.1f}s)")
+        if not 0.5 <= time_scale <= 2.0:
+            print(f"WARNING: extreme time-stretch factor {time_scale:.2f} — "
+                  "the avatar's movement speed will look unnatural. Consider "
+                  "editing the rewritten transcript closer to the original "
+                  "length, or set MOTION_SYNC=freeze.")
+
+    apply_tracking(armature, tracking_data, render_fps, time_scale)
 
     # Load and apply lip sync
     print(f"Loading lip sync data: {config['lipsync_path']}")
     lipsync_data = json.loads(Path(config["lipsync_path"]).read_text())
     apply_lipsync(armature, lipsync_data, float(config["fps"]))
 
-    # Add audio
-    print(f"Adding audio: {config['voice_path']}")
-    add_audio(config["voice_path"])
-
     # Configure render
     setup_render_settings(config)
 
-    # Set frame range — tracking frames are resampled to the render fps,
-    # so scale the end frame the same way apply_tracking scales keyframes.
+    # Set frame range — tracking frames are resampled to the render fps and
+    # stretched by time_scale, so scale the end frame the same way
+    # apply_tracking scales keyframes. Set it explicitly (never max() against
+    # the scene default of 250, which would pad short videos with a frozen
+    # tail). add_audio() below may extend it if the narration runs longer.
     bpy.context.scene.frame_start = 0
-    total_frames = tracking_data.get("total_frames", 300)
-    src_fps = float(tracking_data.get("fps") or render_fps)
-    motion_end = int(math.ceil(total_frames * render_fps / src_fps))
-    bpy.context.scene.frame_end = max(bpy.context.scene.frame_end, motion_end)
+    motion_end = int(math.ceil(total_frames * (render_fps / src_fps) * time_scale))
+    bpy.context.scene.frame_end = motion_end
+
+    # Add audio (extends frame_end if the audio outlasts the motion)
+    print(f"Adding audio: {config['voice_path']}")
+    add_audio(config["voice_path"])
 
     # Render
     output_path = config["output_path"]

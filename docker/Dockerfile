@@ -116,6 +116,11 @@ COPY . .
 # Create necessary directories
 RUN mkdir -p /app/models /app/workspace /app/avatars /app/models/smpl /app/models/gvhmr
 
+# GVHMR's demo resolves checkpoints relative to its repo root
+# (inputs/checkpoints/...). Point that at the mounted models volume so
+# checkpoints downloaded by scripts/setup_models.py persist across rebuilds.
+RUN mkdir -p /opt/gvhmr/inputs && ln -sfn /app/models/gvhmr /opt/gvhmr/inputs/checkpoints
+
 EXPOSE 7860
 
 CMD ["python", "src/ui/app.py"]

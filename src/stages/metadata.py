@@ -134,6 +134,17 @@ class MetadataStage(Stage):
         cap.release()
 
         if ret:
-            # Resize to YouTube thumbnail dimensions (1280x720)
+            # Center-crop to 16:9 first so the thumbnail isn't stretched,
+            # then resize to YouTube dimensions (1280x720).
+            h, w = frame.shape[:2]
+            target_ratio = 16 / 9
+            if w / h > target_ratio:
+                new_w = int(h * target_ratio)
+                x0 = (w - new_w) // 2
+                frame = frame[:, x0:x0 + new_w]
+            else:
+                new_h = int(w / target_ratio)
+                y0 = (h - new_h) // 2
+                frame = frame[y0:y0 + new_h, :]
             thumb = cv2.resize(frame, (1280, 720), interpolation=cv2.INTER_LANCZOS4)
             cv2.imwrite(str(output_path), thumb)

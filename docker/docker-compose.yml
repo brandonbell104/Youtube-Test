@@ -19,15 +19,22 @@ services:
       - RENDER_RESOLUTION_X=${RENDER_RESOLUTION_X:-1920}
       - RENDER_RESOLUTION_Y=${RENDER_RESOLUTION_Y:-1080}
       - RENDER_FPS=${RENDER_FPS:-30}
+      - MOTION_SYNC=${MOTION_SYNC:-stretch}
       - YOUTUBE_CLIENT_ID=${YOUTUBE_CLIENT_ID:-}
       - YOUTUBE_CLIENT_SECRET=${YOUTUBE_CLIENT_SECRET:-}
     ports:
       - "${WEB_PORT:-7860}:7860"
+      # YouTube OAuth redirect listener (only used during the one-time
+      # authorization flow in the upload stage)
+      - "8090:8090"
     volumes:
       - ../workspace:/app/workspace
       - ../models:/app/models
       - ../avatars:/app/avatars
       - ../src:/app/src
+      # Persist the Hugging Face cache (Whisper weights, ~3GB) across
+      # container rebuilds
+      - ../models/hf_cache:/root/.cache/huggingface
     depends_on:
       - ollama
     deploy:

@@ -52,10 +52,18 @@ runs on consumer hardware (NVIDIA 3090 / 3080 Ti) with zero paid services.
 - **SMPL rig built in-Blender from pre-computed data**: the tracking stage
   runs `smplx` once to bake out rest joint positions, skinning weights, and
   faces; Blender's bundled Python doesn't need torch or smplx installed.
-- **Rhubarb Lip Sync**: generates viseme/phoneme data from audio for 3D blend shapes
+- **Rhubarb Lip Sync**: generates viseme/phoneme data from audio for 3D blend
+  shapes. ⚠️ Currently a no-op at render time: the SMPL body mesh has no facial
+  blend shapes (SMPL has no face). Wiring it up requires SMPL-X (FLAME face
+  params) or a separate face-rigged avatar head.
+- **Motion/narration sync** (`MOTION_SYNC`): the rewritten TTS narration never
+  matches the source video's length, so by default the tracked motion is
+  time-stretched to span the audio exactly (`stretch`). `freeze` keeps
+  real-time motion and holds the last pose. The render logs a warning when
+  the stretch factor falls outside 0.5–2.0.
 - **Stages run sequentially**: only one model in VRAM at a time (fits 3080 Ti too)
 
-### Required model file (one-time user action)
+### Required model files (one-time user actions)
 
 GVHMR + smplx need the SMPL body model, which MPI distributes via a free
 non-commercial registration:
@@ -64,6 +72,15 @@ non-commercial registration:
 2. Download **SMPL_python_v.1.1.0** (or similar), extract `SMPL_NEUTRAL.pkl`
 3. Place it at `models/smpl/SMPL_NEUTRAL.pkl` (this is volume-mounted into
    the container)
+
+⚠️ The SMPL license is research/non-commercial. Monetized use requires a
+commercial license from Meshcapade.
+
+GVHMR also needs its pretrained checkpoints (several GB). Run
+`python scripts/setup_models.py` inside the container — it downloads them
+into `models/gvhmr/` (persisted volume; the image symlinks
+`/opt/gvhmr/inputs/checkpoints` there) along with the Whisper, Ollama, and
+Piper models.
 
 ## Job Queue & Orchestration
 
@@ -107,17 +124,18 @@ youtube-automation/
 │   │   ├── metadata.py        # Title/desc/tags/thumbnail
 │   │   └── upload.py          # YouTube Data API v3
 │   ├── blender_scripts/
-│   │   ├── setup_scene.py     # Import avatar, configure scene
-│   │   ├── apply_tracking.py  # Apply SMPL pose params → armature
-│   │   ├── apply_lipsync.py   # Drive viseme blend shapes
-│   │   └── render.py          # Final render to video
+│   │   └── render.py          # Builds SMPL rig, applies pose + lipsync,
+│   │                          # adds audio, renders (single headless script)
 │   └── ui/
 │       └── app.py             # Gradio web interface
 ├── models/                    # Auto-downloaded model files (git-ignored)
 ├── workspace/                 # Job working directories (git-ignored)
-├── avatars/                   # User-provided .glb/.fbx avatar files
+├── avatars/                   # User-provided .glb/.fbx avatars (currently
+│                              # unused — the avatar is built from SMPL data)
 ├── scripts/
-│   └── setup_models.py        # One-time model downloader
+│   ├── setup_models.py        # One-time model downloader
+│   └── test_blender_retarget.py  # Verifies SMPL→Blender pose math
+│                                 # (run inside Blender / bpy)
 ├── requirements.txt
 └── .gitignore
 ```

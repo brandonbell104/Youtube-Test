@@ -52,6 +52,10 @@ class Config:
         default_factory=lambda: int(_env("RENDER_RESOLUTION_Y", "1080"))
     )
     render_fps: int = field(default_factory=lambda: int(_env("RENDER_FPS", "30")))
+    # How to reconcile the new TTS narration length with the tracked motion:
+    #   "stretch" — time-stretch the motion so it spans the audio exactly
+    #   "freeze"  — play motion at real-time speed, hold last pose if audio is longer
+    motion_sync: str = field(default_factory=lambda: _env("MOTION_SYNC", "stretch"))
     default_avatar: str = "default_avatar.glb"
 
     # ── YouTube API ──────────────────────────────────────────────────────

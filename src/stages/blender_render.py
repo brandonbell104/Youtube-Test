@@ -51,6 +51,10 @@ class BlenderRenderStage(Stage):
             if not path.exists():
                 raise FileNotFoundError(f"Missing {label}: {path}")
 
+        # Probe the narration length so the Blender script can time-stretch
+        # the motion to match it (motion_sync == "stretch").
+        audio_duration = self._get_audio_duration(voice_path)
+
         # Build the render config that the Blender script will read
         render_config = {
             "tracking_path": str(tracking_path),
@@ -60,6 +64,8 @@ class BlenderRenderStage(Stage):
             "resolution_x": self.config.render_resolution_x,
             "resolution_y": self.config.render_resolution_y,
             "fps": self.config.render_fps,
+            "audio_duration": audio_duration,
+            "motion_sync": self.config.motion_sync,
         }
 
         config_path = out_dir / "render_config.json"
@@ -101,4 +107,20 @@ class BlenderRenderStage(Stage):
 
         logger.info("Render complete: %s (%.1f MB)", output_path, output_path.stat().st_size / 1e6)
         return {"output_path": str(output_path)}
+
+    @staticmethod
+    def _get_audio_duration(path: Path) -> float:
+        """Duration of an audio file in seconds via ffprobe (0.0 on failure)."""
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet", "-show_entries",
+                "format=duration", "-of", "csv=p=0", str(path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        try:
+            return float(result.stdout.strip())
+        except ValueError:
+            return 0.0
 

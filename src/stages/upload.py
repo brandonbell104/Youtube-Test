@@ -100,7 +100,25 @@ class UploadStage(Stage):
                     },
                     SCOPES,
                 )
-                creds = flow.run_local_server(port=0)
+                # Headless-container friendly flow: bind inside the container
+                # on a fixed, compose-published port, don't try to open a
+                # browser, and let the user click the printed URL from the
+                # host. The redirect to localhost:8090 reaches the container
+                # through the compose port mapping.
+                logger.warning(
+                    "YouTube OAuth required — open the URL printed below in a "
+                    "browser ON THE HOST machine (port 8090 must be published)."
+                )
+                creds = flow.run_local_server(
+                    host="localhost",
+                    bind_addr="0.0.0.0",
+                    port=8090,
+                    open_browser=False,
+                    authorization_prompt_message=(
+                        "\n>>> Open this URL in your browser to authorize the "
+                        "YouTube upload:\n{url}\n"
+                    ),
+                )
 
             # Save credentials
             token_path.write_text(creds.to_json())

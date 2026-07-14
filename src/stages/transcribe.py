@@ -100,8 +100,12 @@ class TranscribeStage(Stage):
             sum(len(s["words"]) for s in transcript_data["segments"]),
         )
 
-        # Release GPU memory
+        # Release GPU memory before the next GPU-heavy stage (GVHMR).
+        # Dropping the reference alone leaves it to the GC's discretion;
+        # collect explicitly so ctranslate2 frees VRAM now.
         self._model = None
+        import gc
+        gc.collect()
 
         return {
             "segment_count": len(transcript_data["segments"]),

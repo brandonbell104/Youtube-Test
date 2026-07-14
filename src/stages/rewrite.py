@@ -10,6 +10,7 @@ Outputs:
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -108,8 +109,11 @@ class RewriteStage(Stage):
         if len(words) <= max_words:
             return [text]
 
+        # Split on sentence-ending punctuation followed by whitespace, so
+        # decimals ("3.5") and abbreviations mid-word don't break sentences.
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+
         chunks = []
-        sentences = text.replace(".", ".\n").split("\n")
         current_chunk: list[str] = []
         current_count = 0
 
