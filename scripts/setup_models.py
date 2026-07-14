@@ -8,6 +8,7 @@ Usage:
     python scripts/setup_models.py
 """
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -34,11 +35,41 @@ def setup_whisper():
 
 
 def setup_ollama():
-    """Pull the LLM model into Ollama."""
-    print(f"\n[2/4] Pulling Ollama model: {config.llm_model}")
+    """Pull the LLM model into the Ollama service via its HTTP API.
+
+    The `ollama` CLI does not exist inside the app container — Ollama runs
+    as a separate compose service — so we call its /api/pull endpoint.
+    """
+    import requests
+
+    host = config.ollama_host
+    print(f"\n[2/4] Pulling Ollama model: {config.llm_model} (via {host})")
     print("       This may take a while on first download...")
-    run(["ollama", "pull", config.llm_model])
-    print("       Done!")
+    try:
+        resp = requests.post(
+            f"{host}/api/pull",
+            json={"name": config.llm_model},
+            stream=True,
+            timeout=7200,
+        )
+        resp.raise_for_status()
+        last_status = ""
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            msg = json.loads(line)
+            if "error" in msg:
+                raise RuntimeError(f"Ollama pull failed: {msg['error']}")
+            status = msg.get("status", "")
+            if status != last_status:
+                print(f"       {status}")
+                last_status = status
+        print("       Done!")
+    except requests.ConnectionError:
+        print(f"       ERROR: Could not reach Ollama at {host}.")
+        print("       Start it first (docker compose up -d ollama), or pull manually:")
+        print(f"       docker exec youtube-automation-ollama ollama pull {config.llm_model}")
+        raise
 
 
 def setup_piper():

@@ -67,36 +67,14 @@ SMPL_JOINT_NAMES = [
     "left_hand", "right_hand",
 ]
 
-# Child joint to use as each bone's "tail" (mostly for visualization — the
-# armature's kinematic behavior is defined by head position and parenting).
-# A value of None means the bone has no natural child; we give it a small
-# offset along +Y so it's visible.
-_BONE_TAIL_CHILD = {
-    "pelvis": "spine1",
-    "left_hip": "left_knee",
-    "right_hip": "right_knee",
-    "spine1": "spine2",
-    "left_knee": "left_ankle",
-    "right_knee": "right_ankle",
-    "spine2": "spine3",
-    "left_ankle": "left_foot",
-    "right_ankle": "right_foot",
-    "spine3": "neck",
-    "left_foot": None,
-    "right_foot": None,
-    "neck": "head",
-    "left_collar": "left_shoulder",
-    "right_collar": "right_shoulder",
-    "head": None,
-    "left_shoulder": "left_elbow",
-    "right_shoulder": "right_elbow",
-    "left_elbow": "left_wrist",
-    "right_elbow": "right_wrist",
-    "left_wrist": "left_hand",
-    "right_wrist": "right_hand",
-    "left_hand": None,
-    "right_hand": None,
-}
+# NOTE on bone orientation: every bone is created pointing along +Y with
+# zero roll, so each bone's rest-space axes coincide with the armature's
+# axes. SMPL pose parameters are joint rotations expressed in frames that
+# are axis-aligned with the body frame at rest, so with identity bone rest
+# orientations the SMPL axis-angle rotations can be assigned directly to
+# pose-bone quaternions and the kinematic chain composes exactly like
+# SMPL's. Do NOT point bones at their children — that gives each bone an
+# arbitrary rest rotation and scrambles the applied pose.
 
 
 def build_smpl_avatar(rig_path: str, mesh_path: str) -> bpy.types.Object:
@@ -129,22 +107,15 @@ def build_smpl_avatar(rig_path: str, mesh_path: str) -> bpy.types.Object:
     bpy.ops.object.mode_set(mode="EDIT")
     edit_bones = arm_data.edit_bones
 
-    # Create all bones with head at their rest joint position
+    # Create all bones with head at their rest joint position, tail along
+    # +Y and zero roll so every bone's rest orientation is identity (see
+    # note above — required for direct SMPL rotation assignment).
     for i, name in enumerate(joint_names):
         eb = edit_bones.new(name)
         head = Vector(rest_joints[i].tolist())
-        child_name = _BONE_TAIL_CHILD.get(name)
-        if child_name is not None and child_name in joint_names:
-            child_idx = joint_names.index(child_name)
-            tail = Vector(rest_joints[child_idx].tolist())
-        else:
-            # Leaf joint — use a small offset along +Y
-            tail = head + Vector((0, 0, 0.05))
-        # Guard against zero-length bones
-        if (tail - head).length < 1e-5:
-            tail = head + Vector((0, 0, 0.02))
         eb.head = head
-        eb.tail = tail
+        eb.tail = head + Vector((0, 0.1, 0))
+        eb.roll = 0.0
 
     # Wire up parents
     for i, name in enumerate(joint_names):
@@ -192,6 +163,11 @@ def build_smpl_avatar(rig_path: str, mesh_path: str) -> bpy.types.Object:
         bsdf.inputs["Roughness"].default_value = 0.6
     mesh_obj.data.materials.append(mat)
 
+    # 7. The rig/mesh data and all SMPL pose params live in SMPL's Y-up
+    # coordinate system. Convert to Blender's Z-up world once, at the
+    # object level, instead of per-keyframe.
+    armature.rotation_euler = (math.radians(90), 0, 0)
+
     bpy.context.view_layer.objects.active = armature
     print("SMPL avatar built successfully")
     return armature
@@ -211,16 +187,16 @@ def _axis_angle_to_quat(aa) -> Quaternion:
     return Quaternion(axis, angle)
 
 
-# SMPL global frame (Y-up) → Blender world (Z-up).
-# MediaPipe/SMPL convention: +X right, +Y up, +Z forward (out of screen)
-# Blender world:              +X right, +Y forward (into screen), +Z up
-# Rotation that sends SMPL → Blender: rotate +90° about X
-_SMPL_TO_BLENDER = Quaternion((1, 0, 0), math.radians(90))
-
-
-def apply_tracking(armature: bpy.types.Object, tracking_data: dict):
+def apply_tracking(armature: bpy.types.Object, tracking_data: dict, render_fps: float):
     """
     Apply per-frame SMPL pose parameters (from GVHMR) to the SMPL armature.
+
+    Keyframes are resampled from the source video's fps (tracking_data["fps"])
+    to the render fps, so motion plays back at real-time speed regardless of
+    what fps the original video used. All rotations/translations are assigned
+    in SMPL (Y-up) space directly — the armature object itself is rotated to
+    Z-up in build_smpl_avatar(), and bones are built with identity rest
+    orientation, so no per-bone coordinate conversion is needed.
 
     tracking_data schema (from src/stages/tracking.py):
       {
@@ -237,6 +213,8 @@ def apply_tracking(armature: bpy.types.Object, tracking_data: dict):
     frames = tracking_data["frames"]
     joint_names = tracking_data.get("joint_names", SMPL_JOINT_NAMES)
     total = len(frames)
+    src_fps = float(tracking_data.get("fps") or render_fps)
+    frame_scale = render_fps / src_fps
 
     bpy.context.view_layer.objects.active = armature
     bpy.ops.object.mode_set(mode="POSE")
@@ -250,22 +228,19 @@ def apply_tracking(armature: bpy.types.Object, tracking_data: dict):
 
     tracked = 0
     for frame_data in frames:
-        frame_idx = int(frame_data["frame"])
-        bpy.context.scene.frame_set(frame_idx)
+        # Resample: source frame index → render timeline frame (float ok)
+        out_frame = float(frame_data["frame"]) * frame_scale
 
         global_orient = frame_data["global_orient"]       # (3,) axis-angle
         body_pose_flat = frame_data["body_pose"]          # (63,) 21 joints * 3
         transl = frame_data["transl"]                     # (3,) world translation
 
-        # Pelvis: global orientation + translation
-        pelvis_q = _SMPL_TO_BLENDER @ _axis_angle_to_quat(global_orient)
-        pelvis_bone.rotation_quaternion = pelvis_q
-        pelvis_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_idx)
+        # Pelvis: global orientation + translation, both in SMPL space.
+        pelvis_bone.rotation_quaternion = _axis_angle_to_quat(global_orient)
+        pelvis_bone.keyframe_insert(data_path="rotation_quaternion", frame=out_frame)
 
-        # Convert translation from SMPL Y-up to Blender Z-up
-        tx, ty, tz = float(transl[0]), float(transl[1]), float(transl[2])
-        pelvis_bone.location = Vector((tx, -tz, ty))
-        pelvis_bone.keyframe_insert(data_path="location", frame=frame_idx)
+        pelvis_bone.location = Vector((float(transl[0]), float(transl[1]), float(transl[2])))
+        pelvis_bone.keyframe_insert(data_path="location", frame=out_frame)
 
         # body_pose is 63-dim = 21 joints (indices 1..21 in SMPL) × 3
         # Joint indices 22 and 23 are hands, not included in body_pose.
@@ -275,14 +250,15 @@ def apply_tracking(armature: bpy.types.Object, tracking_data: dict):
             if bone is None:
                 continue
             bone.rotation_quaternion = _axis_angle_to_quat(aa)
-            bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_idx)
+            bone.keyframe_insert(data_path="rotation_quaternion", frame=out_frame)
 
         tracked += 1
         if tracked % 200 == 0:
             print(f"Applied SMPL pose: {tracked}/{total} frames")
 
     bpy.ops.object.mode_set(mode="OBJECT")
-    print(f"Applied SMPL pose to {tracked} frames")
+    print(f"Applied SMPL pose to {tracked} frames "
+          f"(src {src_fps:.2f} fps → render {render_fps:.2f} fps)")
 
 
 def apply_lipsync(armature: bpy.types.Object, lipsync_data: dict, fps: float):
@@ -431,11 +407,12 @@ def add_audio(voice_path: str):
         scene.sequence_editor_create()
 
     seq = scene.sequence_editor
+    # Start at frame 0 to match scene.frame_start / the first pose keyframe
     sound_strip = seq.sequences.new_sound(
         name="Voice",
         filepath=voice_path,
         channel=1,
-        frame_start=1,
+        frame_start=0,
     )
 
     # Adjust scene length to match audio
@@ -474,10 +451,12 @@ def main():
     # Setup camera and lighting
     setup_camera_and_lighting()
 
-    # Load and apply tracking data (SMPL pose params per frame)
+    # Load and apply tracking data (SMPL pose params per frame),
+    # resampled from the source video fps to the render fps.
     print(f"Loading tracking data: {tracking_path}")
     tracking_data = json.loads(tracking_path.read_text())
-    apply_tracking(armature, tracking_data)
+    render_fps = float(config["fps"])
+    apply_tracking(armature, tracking_data, render_fps)
 
     # Load and apply lip sync
     print(f"Loading lip sync data: {config['lipsync_path']}")
@@ -491,10 +470,13 @@ def main():
     # Configure render
     setup_render_settings(config)
 
-    # Set frame range
+    # Set frame range — tracking frames are resampled to the render fps,
+    # so scale the end frame the same way apply_tracking scales keyframes.
     bpy.context.scene.frame_start = 0
     total_frames = tracking_data.get("total_frames", 300)
-    bpy.context.scene.frame_end = total_frames
+    src_fps = float(tracking_data.get("fps") or render_fps)
+    motion_end = int(math.ceil(total_frames * render_fps / src_fps))
+    bpy.context.scene.frame_end = max(bpy.context.scene.frame_end, motion_end)
 
     # Render
     output_path = config["output_path"]

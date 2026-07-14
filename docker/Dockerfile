@@ -106,7 +106,9 @@ RUN pip install --no-cache-dir 'setuptools<71' \
     && python -c "import lightning; print(f'lightning {lightning.__version__}')"
 
 ENV GVHMR_ROOT=/opt/gvhmr
-ENV PYTHONPATH=/opt/gvhmr:/app:$PYTHONPATH
+# No trailing $PYTHONPATH — it's unset at build time, and the resulting
+# trailing colon would silently add the current directory to sys.path.
+ENV PYTHONPATH=/opt/gvhmr:/app
 
 # Copy application code
 COPY . .

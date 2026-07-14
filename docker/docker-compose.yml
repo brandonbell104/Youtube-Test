@@ -11,6 +11,16 @@ services:
       - NVIDIA_REQUIRE_CUDA=cuda>=12.0
       - __EGL_VENDOR_LIBRARY_DIRS=/usr/share/glvnd/egl_vendor.d
       - OLLAMA_HOST=http://ollama:11434
+      # Pass .env settings through to the app (compose only auto-loads .env
+      # for interpolation — without these lines the container never sees them)
+      - WHISPER_MODEL=${WHISPER_MODEL:-large-v3}
+      - LLM_MODEL=${LLM_MODEL:-llama3:8b}
+      - PIPER_VOICE=${PIPER_VOICE:-en_US-lessac-high}
+      - RENDER_RESOLUTION_X=${RENDER_RESOLUTION_X:-1920}
+      - RENDER_RESOLUTION_Y=${RENDER_RESOLUTION_Y:-1080}
+      - RENDER_FPS=${RENDER_FPS:-30}
+      - YOUTUBE_CLIENT_ID=${YOUTUBE_CLIENT_ID:-}
+      - YOUTUBE_CLIENT_SECRET=${YOUTUBE_CLIENT_SECRET:-}
     ports:
       - "${WEB_PORT:-7860}:7860"
     volumes:

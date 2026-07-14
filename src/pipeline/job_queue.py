@@ -5,6 +5,7 @@ SQLite-backed job queue with per-stage tracking.
 import json
 import sqlite3
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -59,7 +60,7 @@ class JobQueue:
         return conn
 
     def _init_db(self):
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS jobs (
                     id TEXT PRIMARY KEY,
@@ -92,7 +93,7 @@ class JobQueue:
         job_id = uuid.uuid4().hex[:12]
         now = datetime.now(timezone.utc).isoformat()
 
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             conn.execute(
                 "INSERT INTO jobs (id, url, status, priority, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
@@ -107,7 +108,7 @@ class JobQueue:
         return job_id
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is None:
                 return None
@@ -119,7 +120,7 @@ class JobQueue:
             return job
 
     def list_jobs(self) -> list[dict[str, Any]]:
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             rows = conn.execute(
                 "SELECT * FROM jobs ORDER BY priority DESC, created_at ASC"
             ).fetchall()
@@ -135,7 +136,7 @@ class JobQueue:
             return jobs
 
     def delete_job(self, job_id: str) -> None:
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
     # ── Job status updates ───────────────────────────────────────────────
@@ -151,7 +152,7 @@ class JobQueue:
                 vals.append(kwargs[key])
 
         vals.append(job_id)
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             conn.execute(
                 f"UPDATE jobs SET {', '.join(sets)} WHERE id = ?", vals
             )
@@ -167,7 +168,7 @@ class JobQueue:
         now = datetime.now(timezone.utc).isoformat()
         meta_json = json.dumps(metadata or {})
 
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             if status == StageStatus.RUNNING:
                 conn.execute(
                     "UPDATE job_stages SET status=?, started_at=?, error_message=? "
@@ -191,7 +192,7 @@ class JobQueue:
 
     def next_job(self) -> dict[str, Any] | None:
         """Get the next queued job (highest priority, oldest first)."""
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             row = conn.execute(
                 "SELECT * FROM jobs WHERE status = ? ORDER BY priority DESC, created_at ASC LIMIT 1",
                 (JobStatus.QUEUED,),
@@ -202,7 +203,7 @@ class JobQueue:
 
     def get_next_pending_stage(self, job_id: str) -> str | None:
         """Get the name of the next pending stage for a job."""
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             row = conn.execute(
                 "SELECT stage_name FROM job_stages WHERE job_id = ? AND status = ? ORDER BY id LIMIT 1",
                 (job_id, StageStatus.PENDING),
@@ -217,7 +218,7 @@ class JobQueue:
             return
 
         stages_to_reset = STAGE_ORDER[start_idx:]
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             for s in stages_to_reset:
                 conn.execute(
                     "UPDATE job_stages SET status=?, error_message='', "

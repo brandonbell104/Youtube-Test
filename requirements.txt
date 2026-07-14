@@ -28,10 +28,12 @@ scipy>=1.10.0
 # LLM interaction (Ollama API)
 requests>=2.31.0
 
-# YouTube upload (optional — install when ready)
-# google-api-python-client>=2.100.0
-# google-auth-oauthlib>=1.1.0
-# google-auth-httplib2>=0.1.1
+# YouTube upload (stage is skipped unless YOUTUBE_CLIENT_ID is set, but the
+# packages must be installed or upload.py crashes with ModuleNotFoundError
+# the moment credentials are configured)
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.1
 
 # Utilities
 Pillow>=10.0.0
